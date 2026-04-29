@@ -20,7 +20,7 @@ ANORM_RATIO=${ANORM_RATIO:-1.0}
 
 TS=$(date +%Y%m%d_%H%M%S)
 LOG_ROOT=${LOG_ROOT:-logs/thesis_pack_${DATASET}_${TS}}
-mkdir -p "$LOG_ROOT"
+mkdir -p "$LOG_ROOT" "$LOG_ROOT/checkpoints"
 
 run_train_test () {
   local tag=$1
@@ -28,7 +28,7 @@ run_train_test () {
   local win_size=$3
   local k=$4
 
-  local ckpt="checkpoints/${tag}"
+  local ckpt="${LOG_ROOT}/checkpoints/${tag}"
   local log_train="${LOG_ROOT}/${tag}_train.log"
   local log_test="${LOG_ROOT}/${tag}_test.log"
 
