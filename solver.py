@@ -92,6 +92,8 @@ class Solver(object):
             enc_in=self.input_c,
             c_out=self.output_c,
             e_layers=3,
+            d_model=getattr(self, 'd_model', 512),
+            dropout=getattr(self, 'dropout', 0.0),
             use_dgr_prior=self.use_dgr_prior,
             dgr_mode=getattr(self, 'dgr_mode', 'none'),   # 向后兼容
         )
@@ -217,7 +219,17 @@ class Solver(object):
             torch.load(
                 os.path.join(str(self.model_save_path), str(self.dataset) + '_checkpoint.pth')))
         self.model.eval()
-        temperature = 50
+        temperature = getattr(self, 'temperature', 50.0)
+        score_mode = getattr(self, 'score_mode', 'assoc+recon')
+
+        def _combine(loss, series, prior):
+            """根据 score_mode 组合异常分数"""
+            if score_mode == 'recon_only':
+                return loss
+            elif score_mode == 'assoc_only':
+                return series + prior
+            else:  # assoc+recon
+                return (series + prior) + loss
 
         print("======================TEST MODE======================")
 
@@ -249,7 +261,7 @@ class Solver(object):
                                                                                                 self.win_size)),
                         series[u].detach()) * temperature
 
-            score = (series_loss + prior_loss) + loss
+            score = _combine(loss, series_loss, prior_loss)
             cri = score.detach().cpu().numpy()
             attens_energy.append(cri)
 
@@ -284,7 +296,7 @@ class Solver(object):
                                                                                                 self.win_size)),
                         series[u].detach()) * temperature
             # Metric
-            score = (series_loss + prior_loss) + loss
+            score = _combine(loss, series_loss, prior_loss)
             cri = score.detach().cpu().numpy()
             attens_energy.append(cri)
 
@@ -316,7 +328,7 @@ class Solver(object):
                 else:
                     _series_loss += my_kl_loss(_series[u], _pnorm.detach()) * temperature
                     _prior_loss  += my_kl_loss(_pnorm, _series[u].detach()) * temperature
-            _score = (_series_loss + _prior_loss + _loss).detach().cpu().numpy()
+            _score = _combine(_loss, _series_loss, _prior_loss).detach().cpu().numpy()
             _search_scores.append(_score)
             _search_labels.append(labels)
         _search_scores = np.concatenate(_search_scores, axis=0).reshape(-1)
@@ -378,7 +390,7 @@ class Solver(object):
                         (prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
                                                                                                 self.win_size)),
                         series[u].detach()) * temperature
-            score = (series_loss + prior_loss) + loss
+            score = _combine(loss, series_loss, prior_loss)
 
             cri = score.detach().cpu().numpy()
             attens_energy.append(cri)
