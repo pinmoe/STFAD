@@ -94,6 +94,10 @@ class Solver(object):
             e_layers=3,
             use_dgr_prior=self.use_dgr_prior,
             dgr_mode=getattr(self, 'dgr_mode', 'none'),   # 向后兼容
+            prior_fusion=getattr(self, 'prior_fusion', 'replace'),
+            prior_alpha=getattr(self, 'prior_alpha', 0.5),
+            prior_alpha_learnable=getattr(self, 'prior_alpha_learnable', False),
+            dgr_input_mode=getattr(self, 'dgr_input_mode', 'raw'),
         )
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
 

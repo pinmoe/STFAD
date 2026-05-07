@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .attn import AnomalyAttention, AttentionLayer
-from .embed import DataEmbedding, TokenEmbedding
+from .embed import DataEmbedding
 from .dgr_prior import DGRPrior, StaticDGRPrior, MultiScaleDGRPrior
 
 
@@ -51,25 +51,31 @@ class Encoder(nn.Module):
 class AnomalyTransformer(nn.Module):
     def __init__(self, win_size, enc_in, c_out, d_model=512, n_heads=8, e_layers=3, d_ff=512,
                  dropout=0.0, activation='gelu', output_attention=True,
-                 use_dgr_prior=False, dgr_mode='none'):
+                 use_dgr_prior=False, dgr_mode='none',
+                 prior_fusion='replace', prior_alpha=0.5, prior_alpha_learnable=False,
+                 dgr_input_mode='raw'):
         """
         dgr_mode 参数说明（优先级高于 use_dgr_prior）：
-          'none'       → E1，原始高斯先验
-          'dynamic'    → E2，DGRPrior 动态先验
-          'multiscale' → E3，MultiScaleDGRPrior 多尺度动态先验
-          'static'     → E4，StaticDGRPrior 静态可学习先验
+          'none'       -> E1，原始高斯先验
+          'dynamic'    -> E2，DGRPrior 动态先验
+          'multiscale' -> E3，MultiScaleDGRPrior 多尺度动态先验
+          'static'     -> E4，StaticDGRPrior 静态可学习先验
+
+        prior_fusion 参数说明：
+          'replace' -> 仅使用 DGR（兼容现有实现）
+          'blend'   -> 高斯先验与 DGR 先验加权融合
         """
         super(AnomalyTransformer, self).__init__()
         self.output_attention = output_attention
+        self.prior_fusion = prior_fusion
+        self.prior_alpha = float(prior_alpha)
+        self.dgr_input_mode = dgr_input_mode
 
-        # 统一由 dgr_mode 决定结构，use_dgr_prior 仅作 fallback
         if dgr_mode == 'none':
             self.dgr_mode = 'none'
         else:
             self.dgr_mode = dgr_mode
 
-        # 如果外部只传了 use_dgr_prior=True 但没传 dgr_mode，
-        # 默认退回 dynamic（E2），保持向后兼容
         if self.dgr_mode == 'none' and use_dgr_prior:
             self.dgr_mode = 'dynamic'
 
@@ -90,7 +96,6 @@ class AnomalyTransformer(nn.Module):
 
         self.projection = nn.Linear(d_model, c_out, bias=True)
 
-        # 根据 dgr_mode 实例化对应模块，参数键名因此与 checkpoint 一一对应
         if self.dgr_mode == 'multiscale':
             self.dgr_priors = nn.ModuleList(
                 [MultiScaleDGRPrior(enc_in, win_size, n_heads, dropout=dropout)
@@ -105,19 +110,45 @@ class AnomalyTransformer(nn.Module):
                 [DGRPrior(enc_in, n_heads, dropout=dropout) for _ in range(e_layers)]
             )
         else:
-            self.dgr_priors = None  # E1：不挂载任何 DGR 模块
+            self.dgr_priors = None
+
+        self.prior_alpha_logits = None
+        if self.prior_fusion == 'blend' and self.dgr_priors is not None and prior_alpha_learnable:
+            alpha = min(max(self.prior_alpha, 1e-4), 1.0 - 1e-4)
+            init_logit = torch.logit(torch.tensor(alpha))
+            self.prior_alpha_logits = nn.Parameter(init_logit.repeat(e_layers))
 
     def forward(self, x):
         enc_out = self.embedding(x)
         enc_out, series, prior, sigmas = self.encoder(enc_out)
         enc_out = self.projection(enc_out)
 
+        gaussian_prior = prior
+
         if self.dgr_priors is not None:
             if self.dgr_mode == 'static':
-                prior = [self.dgr_priors[u](x) for u in range(len(prior))]
+                dgr_prior = [self.dgr_priors[u](x) for u in range(len(gaussian_prior))]
             else:
-                x_smooth = x.mean(dim=1, keepdim=True).expand_as(x)
-                prior = [self.dgr_priors[u](x_smooth) for u in range(len(prior))]
+                if self.dgr_input_mode == 'smoothed':
+                    dgr_input = x.mean(dim=1, keepdim=True).expand_as(x)
+                else:
+                    dgr_input = x
+                dgr_prior = [self.dgr_priors[u](dgr_input) for u in range(len(gaussian_prior))]
+
+            if self.prior_fusion == 'blend':
+                prior = []
+                for u in range(len(gaussian_prior)):
+                    if self.prior_alpha_logits is not None:
+                        alpha = torch.sigmoid(self.prior_alpha_logits[u])
+                    else:
+                        alpha = torch.tensor(self.prior_alpha, device=x.device, dtype=x.dtype)
+                    fused = alpha * gaussian_prior[u] + (1.0 - alpha) * dgr_prior[u]
+                    fused = fused / fused.sum(dim=-1, keepdim=True).clamp(min=1e-6)
+                    prior.append(fused)
+            else:
+                prior = dgr_prior
+        else:
+            prior = gaussian_prior
 
         if self.output_attention:
             return enc_out, series, prior, sigmas

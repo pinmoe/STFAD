@@ -53,6 +53,20 @@ if __name__ == '__main__':
     parser.add_argument('--dgr_mode', type=str, default='none',
                         choices=['none', 'dynamic', 'multiscale', 'static'])
 
+    # 新增：先验融合策略
+    # replace: 仅使用 DGR（兼容你当前实现）
+    # blend:   高斯先验 + DGR 先验加权融合
+    parser.add_argument('--prior_fusion', type=str, default='replace',
+                        choices=['replace', 'blend'])
+    parser.add_argument('--prior_alpha', type=float, default=0.5,
+                        help='blend 模式下高斯先验权重，范围建议 [0,1]')
+    parser.add_argument('--prior_alpha_learnable', type=str2bool, default='false',
+                        help='是否让 prior_alpha 在训练中可学习（每层一个）')
+
+    # DGR 输入方式：raw 更强调传感器间关系，smoothed 兼容旧逻辑
+    parser.add_argument('--dgr_input_mode', type=str, default='raw',
+                        choices=['raw', 'smoothed'])
+
     config = parser.parse_args()
 
     # dgr_mode 覆盖 use_dgr_prior，保证两者一致
@@ -60,6 +74,10 @@ if __name__ == '__main__':
         config.use_dgr_prior = True
     else:
         config.use_dgr_prior = False
+
+    # dgr_mode=none 时，融合无意义，回退到原始高斯先验
+    if config.dgr_mode == 'none':
+        config.prior_fusion = 'replace'
 
     args = vars(config)
     print('------------ Options -------------')
