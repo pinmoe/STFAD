@@ -209,7 +209,7 @@ class Solver(object):
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
             train_loss = np.average(loss1_list)
 
-            vali_loss1, vali_loss2 = self.vali(self.test_loader)
+            vali_loss1, vali_loss2 = self.vali(self.vali_loader)
 
             print(
                 "Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} ".format(
@@ -303,64 +303,6 @@ class Solver(object):
         combined_energy = np.concatenate([train_energy, test_energy], axis=0)
         thresh = np.percentile(combined_energy, 100 - self.anormly_ratio)
         print("Threshold :", thresh)
-
-        # --- F1-optimal threshold search (PA protocol) ---
-        # Search over a grid of percentiles and pick the one maximising F1.
-        # This is pure post-hoc calibration: no model weights are changed.
-        # We need the ground-truth labels to do this; collect them first
-        # from thre_loader (same loader used for test evaluation below).
-        _search_labels = []
-        _search_scores = []
-        for i, batch in enumerate(self.thre_loader):
-            input_data = batch[0]
-            labels = batch[1]
-            _input = input_data.float().to(self.device)
-            _output, _series, _prior, _ = self.model(_input)
-            _loss = torch.max(criterion(_input, _output), dim=-1).values
-            _series_loss = 0.0
-            _prior_loss = 0.0
-            for u in range(len(_prior)):
-                _pnorm = _prior[u] / torch.unsqueeze(
-                    torch.sum(_prior[u], dim=-1), dim=-1).repeat(1, 1, 1, self.win_size)
-                if u == 0:
-                    _series_loss = my_kl_loss(_series[u], _pnorm.detach()) * temperature
-                    _prior_loss  = my_kl_loss(_pnorm, _series[u].detach()) * temperature
-                else:
-                    _series_loss += my_kl_loss(_series[u], _pnorm.detach()) * temperature
-                    _prior_loss  += my_kl_loss(_pnorm, _series[u].detach()) * temperature
-            _score = (_series_loss + _prior_loss + _loss).detach().cpu().numpy()
-            _search_scores.append(_score)
-            _search_labels.append(labels)
-        _search_scores = np.concatenate(_search_scores, axis=0).reshape(-1)
-        _search_labels = np.concatenate(_search_labels, axis=0).reshape(-1).astype(int)
-
-        best_f1, best_thresh = 0.0, thresh
-        for pct in np.arange(75, 99.9, 0.1):          # finer step 0.1, wider range
-            _t = np.percentile(_search_scores, pct)   # percentile of search scores directly
-            _pred = (_search_scores > _t).astype(int)
-            # apply PA
-            _pred_pa = _pred.copy()
-            _state = False
-            for i in range(len(_search_labels)):
-                if _search_labels[i] == 1 and _pred_pa[i] == 1 and not _state:
-                    _state = True
-                    for j in range(i, 0, -1):
-                        if _search_labels[j] == 0: break
-                        _pred_pa[j] = 1
-                    for j in range(i, len(_search_labels)):
-                        if _search_labels[j] == 0: break
-                        _pred_pa[j] = 1
-                elif _search_labels[i] == 0:
-                    _state = False
-                if _state:
-                    _pred_pa[i] = 1
-            from sklearn.metrics import f1_score
-            _f1 = f1_score(_search_labels, _pred_pa, zero_division=0)
-            if _f1 > best_f1:
-                best_f1, best_thresh = _f1, _t
-        print(f"Optimal threshold (grid search): {best_thresh:.8f}  →  expected F1 ≈ {best_f1:.4f}")
-        thresh = best_thresh
-        # -------------------------------------------------
 
         # (3) evaluation on the test set
         test_labels = []
