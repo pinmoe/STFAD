@@ -50,14 +50,16 @@ if __name__ == '__main__':
     # dynamic    → E2，DGRPrior 动态先验
     # multiscale → E3，MultiScaleDGRPrior 多尺度动态先验
     # static     → E4，StaticDGRPrior 静态可学习先验
+    # sigma_offset → E5，DGRSigmaOffset 调制高斯核宽度
     parser.add_argument('--dgr_mode', type=str, default='none',
-                        choices=['none', 'dynamic', 'multiscale', 'static'])
+                        choices=['none', 'dynamic', 'multiscale', 'static', 'sigma_offset'])
 
-    # 新增：先验融合策略
-    # replace: 仅使用 DGR（兼容你当前实现）
-    # blend:   高斯先验 + DGR 先验加权融合
+    # 先验融合策略
+    # replace:      仅使用 DGR（兼容你当前实现）
+    # blend:        高斯先验 + DGR 先验加权融合
+    # entropy_gate: 基于 DGR 行熵的逐点自适应门控（高熵→高斯，低熵→DGR）
     parser.add_argument('--prior_fusion', type=str, default='replace',
-                        choices=['replace', 'blend'])
+                        choices=['replace', 'blend', 'entropy_gate'])
     parser.add_argument('--prior_alpha', type=float, default=0.5,
                         help='blend 模式下高斯先验权重，范围建议 [0,1]')
     parser.add_argument('--prior_alpha_learnable', type=str2bool, default='false',
@@ -67,6 +69,12 @@ if __name__ == '__main__':
     parser.add_argument('--dgr_input_mode', type=str, default='raw',
                         choices=['raw', 'smoothed'])
 
+    # entropy_gate 融合参数（prior_fusion='entropy_gate' 时生效）
+    parser.add_argument('--prior_entropy_tau', type=float, default=0.6,
+                        help='熵归一化阈值，高于此值偏向高斯先验，范围建议 [0.4, 0.8]')
+    parser.add_argument('--prior_entropy_gamma', type=float, default=12.0,
+                        help='门控陡峭度，越大决策边界越硬，建议 [6, 20]')
+
     config = parser.parse_args()
 
     # dgr_mode 覆盖 use_dgr_prior，保证两者一致
@@ -75,8 +83,8 @@ if __name__ == '__main__':
     else:
         config.use_dgr_prior = False
 
-    # dgr_mode=none 时，融合无意义，回退到原始高斯先验
-    if config.dgr_mode == 'none':
+    # dgr_mode=none 或 sigma_offset 时，prior fusion 无意义，回退原始高斯先验
+    if config.dgr_mode in ('none', 'sigma_offset'):
         config.prior_fusion = 'replace'
 
     args = vars(config)

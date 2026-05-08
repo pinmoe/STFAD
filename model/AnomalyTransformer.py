@@ -1,10 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 from .attn import AnomalyAttention, AttentionLayer
 from .embed import DataEmbedding
-from .dgr_prior import DGRPrior, StaticDGRPrior, MultiScaleDGRPrior
+from .dgr_prior import DGRPrior, StaticDGRPrior, MultiScaleDGRPrior, DGRSigmaOffset
 
 
 class EncoderLayer(nn.Module):
@@ -19,8 +20,8 @@ class EncoderLayer(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.activation = F.relu if activation == "relu" else F.gelu
 
-    def forward(self, x, attn_mask=None):
-        new_x, attn, mask, sigma = self.attention(x, x, x, attn_mask=attn_mask)
+    def forward(self, x, attn_mask=None, sigma_ext=None):
+        new_x, attn, mask, sigma = self.attention(x, x, x, attn_mask=attn_mask, sigma_ext=sigma_ext)
         x = x + self.dropout(new_x)
         y = x = self.norm1(x)
         y = self.dropout(self.activation(self.conv1(y.transpose(-1, 1))))
@@ -34,12 +35,13 @@ class Encoder(nn.Module):
         self.attn_layers = nn.ModuleList(attn_layers)
         self.norm = norm_layer
 
-    def forward(self, x, attn_mask=None):
+    def forward(self, x, attn_mask=None, sigma_ext_list=None):
         series_list = []
         prior_list = []
         sigma_list = []
-        for attn_layer in self.attn_layers:
-            x, series, prior, sigma = attn_layer(x, attn_mask=attn_mask)
+        for u, attn_layer in enumerate(self.attn_layers):
+            sigma_ext = sigma_ext_list[u] if sigma_ext_list is not None else None
+            x, series, prior, sigma = attn_layer(x, attn_mask=attn_mask, sigma_ext=sigma_ext)
             series_list.append(series)
             prior_list.append(prior)
             sigma_list.append(sigma)
@@ -53,7 +55,7 @@ class AnomalyTransformer(nn.Module):
                  dropout=0.0, activation='gelu', output_attention=True,
                  use_dgr_prior=False, dgr_mode='none',
                  prior_fusion='replace', prior_alpha=0.5, prior_alpha_learnable=False,
-                 dgr_input_mode='raw'):
+                 dgr_input_mode='raw', prior_entropy_tau=0.6, prior_entropy_gamma=12.0):
         """
         dgr_mode 参数说明（优先级高于 use_dgr_prior）：
           'none'       -> E1，原始高斯先验
@@ -64,12 +66,15 @@ class AnomalyTransformer(nn.Module):
         prior_fusion 参数说明：
           'replace' -> 仅使用 DGR（兼容现有实现）
           'blend'   -> 高斯先验与 DGR 先验加权融合
+                    'entropy_gate' -> 基于 DGR 行熵的逐点门控融合（高熵偏高斯，低熵偏 DGR）
         """
         super(AnomalyTransformer, self).__init__()
         self.output_attention = output_attention
         self.prior_fusion = prior_fusion
         self.prior_alpha = float(prior_alpha)
         self.dgr_input_mode = dgr_input_mode
+        self.prior_entropy_tau = float(prior_entropy_tau)
+        self.prior_entropy_gamma = float(prior_entropy_gamma)
 
         if dgr_mode == 'none':
             self.dgr_mode = 'none'
@@ -109,6 +114,11 @@ class AnomalyTransformer(nn.Module):
             self.dgr_priors = nn.ModuleList(
                 [DGRPrior(enc_in, n_heads, dropout=dropout) for _ in range(e_layers)]
             )
+        elif self.dgr_mode == 'sigma_offset':
+            # E5：sigma 调制先验，零初始化，完全退化性保证
+            self.dgr_priors = nn.ModuleList(
+                [DGRSigmaOffset(enc_in, n_heads, dropout=dropout) for _ in range(e_layers)]
+            )
         else:
             self.dgr_priors = None
 
@@ -120,12 +130,21 @@ class AnomalyTransformer(nn.Module):
 
     def forward(self, x):
         enc_out = self.embedding(x)
-        enc_out, series, prior, sigmas = self.encoder(enc_out)
+
+        # E5 sigma_offset 模式：在编码器内部调制高斯核宽度（不参与 prior fusion）
+        if self.dgr_mode == 'sigma_offset' and self.dgr_priors is not None:
+            dgr_input = x
+            sigma_ext_list = [self.dgr_priors[u](dgr_input) for u in range(len(self.dgr_priors))]
+            enc_out, series, prior, sigmas = self.encoder(enc_out, sigma_ext_list=sigma_ext_list)
+        else:
+            enc_out, series, prior, sigmas = self.encoder(enc_out)
+
         enc_out = self.projection(enc_out)
 
         gaussian_prior = prior
 
-        if self.dgr_priors is not None:
+        # 非 sigma_offset 模式才做 prior 融合替换
+        if self.dgr_priors is not None and self.dgr_mode != 'sigma_offset':
             if self.dgr_mode == 'static':
                 dgr_prior = [self.dgr_priors[u](x) for u in range(len(gaussian_prior))]
             else:
@@ -142,6 +161,19 @@ class AnomalyTransformer(nn.Module):
                         alpha = torch.sigmoid(self.prior_alpha_logits[u])
                     else:
                         alpha = torch.tensor(self.prior_alpha, device=x.device, dtype=x.dtype)
+                    fused = alpha * gaussian_prior[u] + (1.0 - alpha) * dgr_prior[u]
+                    fused = fused / fused.sum(dim=-1, keepdim=True).clamp(min=1e-6)
+                    prior.append(fused)
+            elif self.prior_fusion == 'entropy_gate':
+                prior = []
+                for u in range(len(gaussian_prior)):
+                    # 逐行熵作为 DGR 不确定性：熵越大越偏向高斯先验。
+                    p_dgr = dgr_prior[u].clamp(min=1e-8)
+                    entropy = -(p_dgr * torch.log(p_dgr)).sum(dim=-1, keepdim=True)
+                    norm = math.log(max(p_dgr.size(-1), 2))
+                    entropy_norm = entropy / norm
+                    alpha = torch.sigmoid(self.prior_entropy_gamma * (entropy_norm - self.prior_entropy_tau))
+
                     fused = alpha * gaussian_prior[u] + (1.0 - alpha) * dgr_prior[u]
                     fused = fused / fused.sum(dim=-1, keepdim=True).clamp(min=1e-6)
                     prior.append(fused)

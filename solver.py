@@ -98,6 +98,8 @@ class Solver(object):
             prior_alpha=getattr(self, 'prior_alpha', 0.5),
             prior_alpha_learnable=getattr(self, 'prior_alpha_learnable', False),
             dgr_input_mode=getattr(self, 'dgr_input_mode', 'raw'),
+            prior_entropy_tau=getattr(self, 'prior_entropy_tau', 0.6),
+            prior_entropy_gamma=getattr(self, 'prior_entropy_gamma', 12.0),
         )
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
 
@@ -110,7 +112,8 @@ class Solver(object):
         loss_1 = []
         loss_2 = []
         with torch.no_grad():
-            for i, (input_data, _) in enumerate(vali_loader):
+            for i, batch in enumerate(vali_loader):
+                input_data = batch[0]
                 input = input_data.float().to(self.device)
                 output, series, prior, _ = self.model(input)
                 series_loss = 0.0
@@ -156,7 +159,8 @@ class Solver(object):
 
             epoch_time = time.time()
             self.model.train()
-            for i, (input_data, labels) in enumerate(self.train_loader):
+            for i, batch in enumerate(self.train_loader):
+                input_data = batch[0]
 
                 self.optimizer.zero_grad()
                 iter_count += 1
@@ -229,7 +233,8 @@ class Solver(object):
 
         # (1) stastic on the train set
         attens_energy = []
-        for i, (input_data, labels) in enumerate(self.train_loader):
+        for i, batch in enumerate(self.train_loader):
+            input_data = batch[0]
             input = input_data.float().to(self.device)
             output, series, prior, _ = self.model(input)
             loss = torch.max(criterion(input, output), dim=-1).values
@@ -262,7 +267,8 @@ class Solver(object):
 
         # (2) find the threshold
         attens_energy = []
-        for i, (input_data, labels) in enumerate(self.thre_loader):
+        for i, batch in enumerate(self.thre_loader):
+            input_data = batch[0]
             input = input_data.float().to(self.device)
             output, series, prior, _ = self.model(input)
 
@@ -305,7 +311,9 @@ class Solver(object):
         # from thre_loader (same loader used for test evaluation below).
         _search_labels = []
         _search_scores = []
-        for i, (input_data, labels) in enumerate(self.thre_loader):
+        for i, batch in enumerate(self.thre_loader):
+            input_data = batch[0]
+            labels = batch[1]
             _input = input_data.float().to(self.device)
             _output, _series, _prior, _ = self.model(_input)
             _loss = torch.max(criterion(_input, _output), dim=-1).values
@@ -357,7 +365,9 @@ class Solver(object):
         # (3) evaluation on the test set
         test_labels = []
         attens_energy = []
-        for i, (input_data, labels) in enumerate(self.thre_loader):
+        for i, batch in enumerate(self.thre_loader):
+            input_data = batch[0]
+            labels = batch[1]
             input = input_data.float().to(self.device)
             output, series, prior, _ = self.model(input)
 

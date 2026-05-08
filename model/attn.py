@@ -31,7 +31,7 @@ class AnomalyAttention(nn.Module):
             for j in range(window_size):
                 self.distances[i][j] = abs(i - j)
 
-    def forward(self, queries, keys, values, sigma, attn_mask):
+    def forward(self, queries, keys, values, sigma, attn_mask, sigma_ext=None):
         B, L, H, E = queries.shape
         _, S, _, D = values.shape
         scale = self.scale or 1. / sqrt(E)
@@ -44,6 +44,9 @@ class AnomalyAttention(nn.Module):
         attn = scale * scores
 
         sigma = sigma.transpose(1, 2)  # B L H ->  B H L
+        # E5：将 DGRSigmaOffset 的输出叠加到高斯核宽度上（零初始化时退化为 E1）
+        if sigma_ext is not None:
+            sigma = sigma + sigma_ext
         window_size = attn.shape[-1]
         sigma = torch.sigmoid(sigma * 5) + 1e-5
         sigma = torch.pow(3, sigma) - 1
@@ -81,7 +84,7 @@ class AttentionLayer(nn.Module):
 
         self.n_heads = n_heads
 
-    def forward(self, queries, keys, values, attn_mask):
+    def forward(self, queries, keys, values, attn_mask, sigma_ext=None):
         B, L, _ = queries.shape
         _, S, _ = keys.shape
         H = self.n_heads
@@ -96,7 +99,8 @@ class AttentionLayer(nn.Module):
             keys,
             values,
             sigma,
-            attn_mask
+            attn_mask,
+            sigma_ext,
         )
         out = out.view(B, L, -1)
 
