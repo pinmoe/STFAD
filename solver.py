@@ -101,7 +101,17 @@ class Solver(object):
             prior_entropy_tau=getattr(self, 'prior_entropy_tau', 0.6),
             prior_entropy_gamma=getattr(self, 'prior_entropy_gamma', 12.0),
         )
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
+        # 修复二：对 DGR 参数单独施加 weight_decay，减少过拟合（尤其对 E4/E5）
+        if hasattr(self.model, 'dgr_priors') and self.model.dgr_priors is not None:
+            dgr_param_ids = {id(p) for p in self.model.dgr_priors.parameters()}
+            main_params = [p for p in self.model.parameters() if id(p) not in dgr_param_ids]
+            dgr_params = list(self.model.dgr_priors.parameters())
+            self.optimizer = torch.optim.Adam([
+                {'params': main_params, 'lr': self.lr},
+                {'params': dgr_params, 'lr': self.lr, 'weight_decay': 1e-4},
+            ])
+        else:
+            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
 
         if torch.cuda.is_available():
             self.model.cuda()
@@ -126,13 +136,15 @@ class Solver(object):
                             (prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
                                                                                                     self.win_size)).detach(),
                             series[u])))
+                    # 修复一：Phase 2 detach DGR prior，避免 DGR 参数通过 prior_loss 接收梯度
+                    prior_u_d = prior[u].detach()
                     prior_loss += (torch.mean(
-                        my_kl_loss((prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
-                                                                                                           self.win_size)),
+                        my_kl_loss((prior_u_d / torch.unsqueeze(torch.sum(prior_u_d, dim=-1), dim=-1).repeat(1, 1, 1,
+                                                                                                              self.win_size)),
                                    series[u].detach())) + torch.mean(
                         my_kl_loss(series[u].detach(),
-                                   (prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
-                                                                                                           self.win_size)))))
+                                   (prior_u_d / torch.unsqueeze(torch.sum(prior_u_d, dim=-1), dim=-1).repeat(1, 1, 1,
+                                                                                                              self.win_size)))))
                 series_loss = series_loss / len(prior)
                 prior_loss = prior_loss / len(prior)
 
@@ -178,13 +190,16 @@ class Solver(object):
                         my_kl_loss((prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
                                                                                                            self.win_size)).detach(),
                                    series[u])))
+                    # 修复一：Phase 2 detach DGR prior，消除梯度冲突
+                    # DGR 参数不再参与 Phase 2 的反向传播，E5 的 sigma_offset 仅由 Phase 1 的 rec_loss 训练
+                    prior_u_d = prior[u].detach()
                     prior_loss += (torch.mean(my_kl_loss(
-                        (prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
-                                                                                                self.win_size)),
+                        (prior_u_d / torch.unsqueeze(torch.sum(prior_u_d, dim=-1), dim=-1).repeat(1, 1, 1,
+                                                                                                   self.win_size)),
                         series[u].detach())) + torch.mean(
                         my_kl_loss(series[u].detach(), (
-                                prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
-                                                                                                       self.win_size)))))
+                                prior_u_d / torch.unsqueeze(torch.sum(prior_u_d, dim=-1), dim=-1).repeat(1, 1, 1,
+                                                                                                          self.win_size)))))
                 series_loss = series_loss / len(prior)
                 prior_loss = prior_loss / len(prior)
 

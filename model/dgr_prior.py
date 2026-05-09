@@ -34,7 +34,11 @@ class DGRPrior(nn.Module):
     def forward(self, x_seq: torch.Tensor) -> torch.Tensor:
         B, W, C = x_seq.shape
         H = self.n_heads
-        feat = self.proj(x_seq).view(B, W, H, self.head_dim).permute(0, 2, 1, 3)
+        # 修复四：使用时序差分而非原始值，与 MSL 等点突变异常类型匹配
+        # diff[0] = 0，后续位为相邻时刻差分
+        diff = torch.zeros_like(x_seq)
+        diff[:, 1:, :] = x_seq[:, 1:, :] - x_seq[:, :-1, :]
+        feat = self.proj(diff).view(B, W, H, self.head_dim).permute(0, 2, 1, 3)
         feat = self.dropout(feat)
         sim = torch.matmul(feat, feat.transpose(-1, -2)) * self.scale
         return F.softmax(sim, dim=-1)

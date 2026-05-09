@@ -44,9 +44,10 @@ class AnomalyAttention(nn.Module):
         attn = scale * scores
 
         sigma = sigma.transpose(1, 2)  # B L H ->  B H L
-        # E5：将 DGRSigmaOffset 的输出叠加到高斯核宽度上（零初始化时退化为 E1）
+        # E5：将 DGR SigmaOffset 的输出叠加到高斯核宽度上（零初始化时退化为 E1）
+        # 修复三：用 tanh 限制偏移幅度在 (-1, 1) 内，防止 sigma 无界偏移
         if sigma_ext is not None:
-            sigma = sigma + sigma_ext
+            sigma = sigma + torch.tanh(sigma_ext)
         window_size = attn.shape[-1]
         sigma = torch.sigmoid(sigma * 5) + 1e-5
         sigma = torch.pow(3, sigma) - 1
