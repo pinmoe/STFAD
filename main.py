@@ -69,6 +69,10 @@ if __name__ == '__main__':
     parser.add_argument('--dgr_input_mode', type=str, default='raw',
                         choices=['raw', 'smoothed'])
 
+    # DGR 特征构建方式：diff=时序差分（适合点突变，MSL/SKAB），raw=原始值（适合慢变工控，HAI）
+    parser.add_argument('--dgr_feature_mode', type=str, default='diff',
+                        choices=['diff', 'raw'])
+
     # entropy_gate 融合参数（prior_fusion='entropy_gate' 时生效）
     parser.add_argument('--prior_entropy_tau', type=float, default=0.6,
                         help='熵归一化阈值，高于此值偏向高斯先验，范围建议 [0.4, 0.8]')

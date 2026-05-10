@@ -55,7 +55,8 @@ class AnomalyTransformer(nn.Module):
                  dropout=0.0, activation='gelu', output_attention=True,
                  use_dgr_prior=False, dgr_mode='none',
                  prior_fusion='replace', prior_alpha=0.5, prior_alpha_learnable=False,
-                 dgr_input_mode='raw', prior_entropy_tau=0.6, prior_entropy_gamma=12.0):
+                 dgr_input_mode='raw', prior_entropy_tau=0.6, prior_entropy_gamma=12.0,
+                 dgr_feature_mode='diff'):
         """
         dgr_mode 参数说明（优先级高于 use_dgr_prior）：
           'none'       -> E1，原始高斯先验
@@ -75,6 +76,8 @@ class AnomalyTransformer(nn.Module):
         self.dgr_input_mode = dgr_input_mode
         self.prior_entropy_tau = float(prior_entropy_tau)
         self.prior_entropy_gamma = float(prior_entropy_gamma)
+        # use_diff=False 时用原始值建相似度矩阵，适合 HAI 等工控慢变信号
+        self._dgr_use_diff = (dgr_feature_mode != 'raw')
 
         if dgr_mode == 'none':
             self.dgr_mode = 'none'
@@ -103,7 +106,7 @@ class AnomalyTransformer(nn.Module):
 
         if self.dgr_mode == 'multiscale':
             self.dgr_priors = nn.ModuleList(
-                [MultiScaleDGRPrior(enc_in, win_size, n_heads, dropout=dropout)
+                [MultiScaleDGRPrior(enc_in, win_size, n_heads, dropout=dropout, use_diff=self._dgr_use_diff)
                  for _ in range(e_layers)]
             )
         elif self.dgr_mode == 'static':
@@ -112,7 +115,7 @@ class AnomalyTransformer(nn.Module):
             )
         elif self.dgr_mode == 'dynamic':
             self.dgr_priors = nn.ModuleList(
-                [DGRPrior(enc_in, n_heads, dropout=dropout) for _ in range(e_layers)]
+                [DGRPrior(enc_in, n_heads, dropout=dropout, use_diff=self._dgr_use_diff) for _ in range(e_layers)]
             )
         elif self.dgr_mode == 'sigma_offset':
             # E5：sigma 调制先验，零初始化，完全退化性保证

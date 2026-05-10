@@ -100,6 +100,7 @@ class Solver(object):
             dgr_input_mode=getattr(self, 'dgr_input_mode', 'raw'),
             prior_entropy_tau=getattr(self, 'prior_entropy_tau', 0.6),
             prior_entropy_gamma=getattr(self, 'prior_entropy_gamma', 12.0),
+            dgr_feature_mode=getattr(self, 'dgr_feature_mode', 'diff'),
         )
         # 修复二：对 DGR 参数单独施加 weight_decay，减少过拟合（尤其对 E4/E5）
         if hasattr(self.model, 'dgr_priors') and self.model.dgr_priors is not None:
