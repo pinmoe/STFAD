@@ -79,6 +79,21 @@ if __name__ == '__main__':
     parser.add_argument('--prior_entropy_gamma', type=float, default=12.0,
                         help='门控陡峭度，越大决策边界越硬，建议 [6, 20]')
 
+    # 测试阶段异常评分策略（无需重训练，仅影响 test 模式）
+    # combined : (KL_series + KL_prior) + max_rec  原始论文公式（默认）
+    # rec_only  : max(MSE, dim=channel)            纯重建误差（适合HAI等值漂移型异常）
+    # rec_mean  : mean(MSE, dim=channel)           均值重建误差（比max更平稳，减少噪声通道影响）
+    # weighted  : score_alpha*rec + (1-alpha)*KL   可调权重融合
+    parser.add_argument('--score_mode', type=str, default='combined',
+                        choices=['combined', 'rec_only', 'rec_mean', 'weighted'],
+                        help='测试阶段异常评分公式')
+    parser.add_argument('--score_alpha', type=float, default=1.0,
+                        help='weighted 模式下重建误差权重，范围 [0, 1]')
+    # 测试后处理：对最终 1D 评分序列做滑动均值平滑（抑制孤立尖峰假阳性）
+    # 对持续性异常（如 HAI 工控攻击）有效；点异常数据集保持默认 1（不平滑）
+    parser.add_argument('--score_smooth_k', type=int, default=1,
+                        help='评分时序平滑窗口大小（1=不平滑，建议尝试 5/10/20）')
+
     config = parser.parse_args()
 
     # dgr_mode 覆盖 use_dgr_prior，保证两者一致

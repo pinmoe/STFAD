@@ -191,16 +191,18 @@ class Solver(object):
                         my_kl_loss((prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
                                                                                                            self.win_size)).detach(),
                                    series[u])))
-                    # 修复一：Phase 2 detach DGR prior，消除梯度冲突
-                    # DGR 参数不再参与 Phase 2 的反向传播，E5 的 sigma_offset 仅由 Phase 1 的 rec_loss 训练
-                    prior_u_d = prior[u].detach()
+                    # Phase 2 梯度流：所有模式（含 E5 sigma_offset）prior 均参与反向传播。
+                    # sigma_offset 的梯度路径：prior_loss → prior → sigma → sigma_ext → DGRSigmaOffset。
+                    # Phase 1 的 series_loss 已 detach prior，sigma_offset 只通过 Phase 2 训练——
+                    # 这正好是 Minimax 博弈的设计意图：Phase 2 让先验追赶系列注意力分布。
+                    prior_u_p2 = prior[u]  # 所有模式统一：prior 参与 Phase 2 梯度
+                    _p2_denom = torch.unsqueeze(torch.sum(prior_u_p2, dim=-1), dim=-1).repeat(1, 1, 1,
+                                                                                               self.win_size)
                     prior_loss += (torch.mean(my_kl_loss(
-                        (prior_u_d / torch.unsqueeze(torch.sum(prior_u_d, dim=-1), dim=-1).repeat(1, 1, 1,
-                                                                                                   self.win_size)),
+                        prior_u_p2 / _p2_denom,
                         series[u].detach())) + torch.mean(
-                        my_kl_loss(series[u].detach(), (
-                                prior_u_d / torch.unsqueeze(torch.sum(prior_u_d, dim=-1), dim=-1).repeat(1, 1, 1,
-                                                                                                          self.win_size)))))
+                        my_kl_loss(series[u].detach(),
+                                   prior_u_p2 / _p2_denom)))
                 series_loss = series_loss / len(prior)
                 prior_loss = prior_loss / len(prior)
 
@@ -246,6 +248,12 @@ class Solver(object):
         print("======================TEST MODE======================")
 
         criterion = nn.MSELoss(reduce=False)
+        # 测试评分策略参数（无需重训练）
+        _smode  = getattr(self, 'score_mode',    'combined')
+        _salpha = float(getattr(self, 'score_alpha',   1.0))
+        _smooth = int(getattr(self, 'score_smooth_k',  1))
+        if _smode != 'combined' or _smooth > 1:
+            print(f"[评分策略] mode={_smode},  alpha={_salpha},  smooth_k={_smooth}")
 
         # (1) stastic on the train set
         attens_energy = []
@@ -253,7 +261,8 @@ class Solver(object):
             input_data = batch[0]
             input = input_data.float().to(self.device)
             output, series, prior, _ = self.model(input)
-            loss = torch.max(criterion(input, output), dim=-1).values
+            _rec = criterion(input, output)
+            loss = _rec.mean(dim=-1) if _smode == 'rec_mean' else torch.max(_rec, dim=-1).values
             series_loss = 0.0
             prior_loss = 0.0
             for u in range(len(prior)):
@@ -274,12 +283,20 @@ class Solver(object):
                                                                                                 self.win_size)),
                         series[u].detach()) * temperature
 
-            score = (series_loss + prior_loss) + loss
+            kl_score = series_loss + prior_loss
+            if _smode in ('rec_only', 'rec_mean'):
+                score = loss
+            elif _smode == 'weighted':
+                score = _salpha * loss + (1.0 - _salpha) * kl_score
+            else:
+                score = kl_score + loss
             cri = score.detach().cpu().numpy()
             attens_energy.append(cri)
 
         attens_energy = np.concatenate(attens_energy, axis=0).reshape(-1)
         train_energy = np.array(attens_energy)
+        if _smooth > 1:
+            train_energy = np.convolve(train_energy, np.ones(_smooth) / _smooth, mode='same')
 
         # (2) find the threshold
         attens_energy = []
@@ -288,7 +305,8 @@ class Solver(object):
             input = input_data.float().to(self.device)
             output, series, prior, _ = self.model(input)
 
-            loss = torch.max(criterion(input, output), dim=-1).values
+            _rec = criterion(input, output)
+            loss = _rec.mean(dim=-1) if _smode == 'rec_mean' else torch.max(_rec, dim=-1).values
 
             series_loss = 0.0
             prior_loss = 0.0
@@ -310,12 +328,20 @@ class Solver(object):
                                                                                                 self.win_size)),
                         series[u].detach()) * temperature
             # Metric
-            score = (series_loss + prior_loss) + loss
+            kl_score = series_loss + prior_loss
+            if _smode in ('rec_only', 'rec_mean'):
+                score = loss
+            elif _smode == 'weighted':
+                score = _salpha * loss + (1.0 - _salpha) * kl_score
+            else:
+                score = kl_score + loss
             cri = score.detach().cpu().numpy()
             attens_energy.append(cri)
 
         attens_energy = np.concatenate(attens_energy, axis=0).reshape(-1)
         test_energy = np.array(attens_energy)
+        if _smooth > 1:
+            test_energy = np.convolve(test_energy, np.ones(_smooth) / _smooth, mode='same')
         combined_energy = np.concatenate([train_energy, test_energy], axis=0)
         thresh = np.percentile(combined_energy, 100 - self.anormly_ratio)
         print("Threshold :", thresh)
@@ -329,7 +355,8 @@ class Solver(object):
             input = input_data.float().to(self.device)
             output, series, prior, _ = self.model(input)
 
-            loss = torch.max(criterion(input, output), dim=-1).values
+            _rec = criterion(input, output)
+            loss = _rec.mean(dim=-1) if _smode == 'rec_mean' else torch.max(_rec, dim=-1).values
 
             series_loss = 0.0
             prior_loss = 0.0
@@ -350,7 +377,13 @@ class Solver(object):
                         (prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
                                                                                                 self.win_size)),
                         series[u].detach()) * temperature
-            score = (series_loss + prior_loss) + loss
+            kl_score = series_loss + prior_loss
+            if _smode in ('rec_only', 'rec_mean'):
+                score = loss
+            elif _smode == 'weighted':
+                score = _salpha * loss + (1.0 - _salpha) * kl_score
+            else:
+                score = kl_score + loss
 
             cri = score.detach().cpu().numpy()
             attens_energy.append(cri)
@@ -359,6 +392,8 @@ class Solver(object):
         attens_energy = np.concatenate(attens_energy, axis=0).reshape(-1)
         test_labels = np.concatenate(test_labels, axis=0).reshape(-1)
         test_energy = np.array(attens_energy)
+        if _smooth > 1:
+            test_energy = np.convolve(test_energy, np.ones(_smooth) / _smooth, mode='same')
         test_labels = np.array(test_labels)
 
         pred = (test_energy > thresh).astype(int)
