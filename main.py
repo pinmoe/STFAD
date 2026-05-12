@@ -85,8 +85,8 @@ if __name__ == '__main__':
     # rec_mean  : mean(MSE, dim=channel)           均值重建误差（比max更平稳，减少噪声通道影响）
     # weighted  : score_alpha*rec + (1-alpha)*KL   可调权重融合
     parser.add_argument('--score_mode', type=str, default='combined',
-                        choices=['combined', 'rec_only', 'rec_mean', 'weighted'],
-                        help='测试阶段异常评分公式')
+                        choices=['combined', 'rec_only', 'rec_mean', 'weighted', 'chan_var'],
+                        help='测试阶段异常评分公式（chan_var=通道方差倒数加权，适合多传感器工控数据如HAI）')
     parser.add_argument('--score_alpha', type=float, default=1.0,
                         help='weighted 模式下重建误差权重，范围 [0, 1]')
     # 测试后处理：对最终 1D 评分序列做滑动均值平滑（抑制孤立尖峰假阳性）

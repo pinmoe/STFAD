@@ -255,6 +255,41 @@ class Solver(object):
         if _smode != 'combined' or _smooth > 1:
             print(f"[评分策略] mode={_smode},  alpha={_salpha},  smooth_k={_smooth}")
 
+        # chan_var 模式：在训练集上估计每个通道重建误差的方差，
+        # 以方差倒数作为通道权重 w_c ∝ 1/(Var_c + ε)，归一化后加权求和。
+        # 原理：方差小的通道在正常段重建稳定，偶现误差峰判别力更强；
+        #       方差大的通道本身不稳定（如噪声传感器），应降权以减少假阳性。
+        # 此步骤仅需额外一次 train_loader 前向，不修改模型参数。
+        chan_w = None
+        if _smode == 'chan_var':
+            print("[chan_var] 正在估计各通道重建误差方差...")
+            _rec_sum  = None  # 累积 (C,) 均值，用于 Welford 两趟法
+            _rec_sum2 = None  # 累积 (C,) 平方和
+            _rec_cnt  = 0
+            with torch.no_grad():
+                for _cbatch in self.train_loader:
+                    _cinput = _cbatch[0].float().to(self.device)
+                    _coutput, _, _, _ = self.model(_cinput)
+                    _crec = criterion(_cinput, _coutput)  # (B, W, C)
+                    _crec_flat = _crec.view(-1, _crec.shape[-1])  # (N, C)
+                    if _rec_sum is None:
+                        _rec_sum  = _crec_flat.sum(dim=0)
+                        _rec_sum2 = (_crec_flat ** 2).sum(dim=0)
+                    else:
+                        _rec_sum  += _crec_flat.sum(dim=0)
+                        _rec_sum2 += (_crec_flat ** 2).sum(dim=0)
+                    _rec_cnt += _crec_flat.shape[0]
+            # Var = E[x^2] - (E[x])^2
+            _chan_mean = _rec_sum / _rec_cnt
+            _chan_var  = (_rec_sum2 / _rec_cnt) - _chan_mean ** 2
+            _chan_var  = _chan_var.clamp(min=0.0)  # 防止浮点负值
+            chan_w = 1.0 / (_chan_var + 1e-8)
+            chan_w = chan_w / chan_w.sum()  # 归一化为概率权重，形状 (C,)
+            top5_idx = chan_w.topk(5).indices.tolist()
+            print(f"[chan_var] 样本数={_rec_cnt}, 通道数={chan_w.shape[0]}")
+            print(f"[chan_var] 权重: min={chan_w.min().item():.6f},  "
+                  f"max={chan_w.max().item():.6f},  判别力最强5通道={top5_idx}")
+
         # (1) stastic on the train set
         attens_energy = []
         for i, batch in enumerate(self.train_loader):
@@ -262,7 +297,12 @@ class Solver(object):
             input = input_data.float().to(self.device)
             output, series, prior, _ = self.model(input)
             _rec = criterion(input, output)
-            loss = _rec.mean(dim=-1) if _smode == 'rec_mean' else torch.max(_rec, dim=-1).values
+            if _smode == 'chan_var':
+                loss = (_rec * chan_w.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
+            elif _smode == 'rec_mean':
+                loss = _rec.mean(dim=-1)
+            else:
+                loss = torch.max(_rec, dim=-1).values
             series_loss = 0.0
             prior_loss = 0.0
             for u in range(len(prior)):
@@ -284,7 +324,7 @@ class Solver(object):
                         series[u].detach()) * temperature
 
             kl_score = series_loss + prior_loss
-            if _smode in ('rec_only', 'rec_mean'):
+            if _smode in ('rec_only', 'rec_mean', 'chan_var'):
                 score = loss
             elif _smode == 'weighted':
                 score = _salpha * loss + (1.0 - _salpha) * kl_score
@@ -306,7 +346,12 @@ class Solver(object):
             output, series, prior, _ = self.model(input)
 
             _rec = criterion(input, output)
-            loss = _rec.mean(dim=-1) if _smode == 'rec_mean' else torch.max(_rec, dim=-1).values
+            if _smode == 'chan_var':
+                loss = (_rec * chan_w.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
+            elif _smode == 'rec_mean':
+                loss = _rec.mean(dim=-1)
+            else:
+                loss = torch.max(_rec, dim=-1).values
 
             series_loss = 0.0
             prior_loss = 0.0
@@ -329,7 +374,7 @@ class Solver(object):
                         series[u].detach()) * temperature
             # Metric
             kl_score = series_loss + prior_loss
-            if _smode in ('rec_only', 'rec_mean'):
+            if _smode in ('rec_only', 'rec_mean', 'chan_var'):
                 score = loss
             elif _smode == 'weighted':
                 score = _salpha * loss + (1.0 - _salpha) * kl_score
@@ -356,7 +401,12 @@ class Solver(object):
             output, series, prior, _ = self.model(input)
 
             _rec = criterion(input, output)
-            loss = _rec.mean(dim=-1) if _smode == 'rec_mean' else torch.max(_rec, dim=-1).values
+            if _smode == 'chan_var':
+                loss = (_rec * chan_w.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
+            elif _smode == 'rec_mean':
+                loss = _rec.mean(dim=-1)
+            else:
+                loss = torch.max(_rec, dim=-1).values
 
             series_loss = 0.0
             prior_loss = 0.0
@@ -378,7 +428,7 @@ class Solver(object):
                                                                                                 self.win_size)),
                         series[u].detach()) * temperature
             kl_score = series_loss + prior_loss
-            if _smode in ('rec_only', 'rec_mean'):
+            if _smode in ('rec_only', 'rec_mean', 'chan_var'):
                 score = loss
             elif _smode == 'weighted':
                 score = _salpha * loss + (1.0 - _salpha) * kl_score
