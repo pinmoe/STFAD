@@ -12,7 +12,8 @@ def str2bool(v):
 
 
 def main(config):
-    cudnn.benchmark = True
+    cudnn.benchmark = False
+    set_random_seed(config.seed)
     if (not os.path.exists(config.model_save_path)):
         mkdir(config.model_save_path)
     solver = Solver(vars(config))
@@ -41,6 +42,7 @@ if __name__ == '__main__':
     parser.add_argument('--data_path', type=str, default='./dataset/creditcard_ts.csv')
     parser.add_argument('--model_save_path', type=str, default='checkpoints')
     parser.add_argument('--anormly_ratio', type=float, default=4.00)
+    parser.add_argument('--seed', type=int, default=2024)
 
     # use_dgr_prior 保留向后兼容，但优先使用 dgr_mode
     parser.add_argument('--use_dgr_prior', type=str2bool, default='false')
