@@ -5,7 +5,7 @@ import math
 
 from .attn import AnomalyAttention, AttentionLayer
 from .embed import DataEmbedding
-from .dgr_prior import DGRPrior, StaticDGRPrior, MultiScaleDGRPrior, DGRSigmaOffset
+from .dgr_prior import DGRPrior, StaticDGRPrior, MultiScaleDGRPrior, DGRSigmaOffset, DGRPriorPE
 
 
 class EncoderLayer(nn.Module):
@@ -116,6 +116,10 @@ class AnomalyTransformer(nn.Module):
         elif self.dgr_mode == 'dynamic':
             self.dgr_priors = nn.ModuleList(
                 [DGRPrior(enc_in, n_heads, dropout=dropout, use_diff=self._dgr_use_diff) for _ in range(e_layers)]
+            )
+        elif self.dgr_mode == 'dynamic_pe':
+            self.dgr_priors = nn.ModuleList(
+                [DGRPriorPE(enc_in, n_heads, win_size, dropout=dropout) for _ in range(e_layers)]
             )
         elif self.dgr_mode == 'sigma_offset':
             # E5：sigma 调制先验，零初始化，完全退化性保证

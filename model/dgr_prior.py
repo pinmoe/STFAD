@@ -148,6 +148,61 @@ class MultiScaleDGRPrior(nn.Module):
         return prior
 
 
+class DGRPriorPE(nn.Module):
+    """
+    E6：位置编码增强的动态 DGR Prior。
+
+    在 E2（DGRPrior）基础上，向差分特征中注入正弦位置编码，
+    修复 E2 因差分特征无时间次序信息而退化为均匀先验的问题。
+
+    关键设计：
+    - pe_scale 零初始化：训练起点与 E2 完全一致，无 cold-start 风险。
+    - 训练过程中 pe_scale 自主学习注入量，对 MSL（时间局部性主导）
+      自然倾向于保留时间结构，对 SMAP/SKAB（通道耦合主导）保留通道信息。
+    """
+    def __init__(self, in_channels: int, n_heads: int, win_size: int, dropout: float = 0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = max(in_channels // max(n_heads, 1), 1)
+        self.scale = self.head_dim ** -0.5
+        self.proj = nn.Linear(in_channels, n_heads * self.head_dim, bias=False)
+        self.dropout = nn.Dropout(dropout)
+        if self.head_dim > 1:
+            nn.init.xavier_uniform_(self.proj.weight)
+        else:
+            nn.init.normal_(self.proj.weight, std=0.01)
+
+        # 正弦位置编码 (W, C)，固定不学习
+        pe = torch.zeros(win_size, in_channels)
+        position = torch.arange(win_size).unsqueeze(1).float()
+        half = in_channels // 2
+        div_term = torch.exp(torch.arange(0, half).float() * (-math.log(10000.0) / half))
+        pe[:, 0:2*half:2] = torch.sin(position * div_term)
+        pe[:, 1:2*half:2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe)  # (W, C)
+
+        # 零初始化：训练开始时 pe_scale=0，行为与 E2 完全相同
+        self.pe_scale = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x_seq: torch.Tensor) -> torch.Tensor:
+        B, W, C = x_seq.shape
+        H = self.n_heads
+
+        # 差分特征（与 E2 相同）
+        feat_input = torch.zeros_like(x_seq)
+        feat_input[:, 1:, :] = x_seq[:, 1:, :] - x_seq[:, :-1, :]
+
+        # 注入位置编码
+        feat_input = feat_input + self.pe_scale * self.pe[:W, :].unsqueeze(0)
+
+        feat = self.proj(feat_input).view(B, W, H, self.head_dim).permute(0, 2, 1, 3)
+        feat = self.dropout(feat)
+        if self.head_dim > 1:
+            feat = F.normalize(feat, dim=-1)
+        sim = torch.matmul(feat, feat.transpose(-1, -2)) * self.scale
+        return F.softmax(sim, dim=-1)
+
+
 class DGRSigmaOffset(nn.Module):
     """
     E5：DGR Sigma 调制先验。

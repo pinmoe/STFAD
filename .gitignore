@@ -139,13 +139,12 @@ results/
 diagnostics/
 logs/
 documents/
-run_all_experiments.sh
-run_smap_experiments.sh
-run_msl_skab_experiments.sh
+
+# scripts
+scripts/
 
 # figures
 figures/
 tools/
-
 
 .vscode/

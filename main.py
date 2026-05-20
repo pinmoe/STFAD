@@ -54,7 +54,7 @@ if __name__ == '__main__':
     # static     → E4，StaticDGRPrior 静态可学习先验
     # sigma_offset → E5，DGRSigmaOffset 调制高斯核宽度
     parser.add_argument('--dgr_mode', type=str, default='none',
-                        choices=['none', 'dynamic', 'multiscale', 'static', 'sigma_offset'])
+                        choices=['none', 'dynamic', 'multiscale', 'static', 'sigma_offset', 'dynamic_pe'])
 
     # 先验融合策略
     # replace:      仅使用 DGR（兼容你当前实现）
@@ -95,6 +95,16 @@ if __name__ == '__main__':
     # 对持续性异常（如 HAI 工控攻击）有效；点异常数据集保持默认 1（不平滑）
     parser.add_argument('--score_smooth_k', type=int, default=1,
                         help='评分时序平滑窗口大小（1=不平滑，建议尝试 5/10/20）')
+
+    # 差分重建辅助评分（方向A）：对点突变异常在差分域放大信号，无需重训练
+    parser.add_argument('--diff_beta', type=float, default=0.0,
+                        help='差分重建辅助评分权重（0=不启用，MSL/SKAB/SMAP建议 0.5~2.0）')
+    # 局部z-score后处理（方向B）：突出局部异常对比度，抑制背景能量波动带来的假阳性
+    parser.add_argument('--score_local_z_win', type=int, default=0,
+                        help='局部z-score半窗口大小（0=不启用，MSL建议 200~500）')
+    # 训练时差分重建项（方向C）：显式训练模型正确重建局部变化，需重训练
+    parser.add_argument('--lambda_diff', type=float, default=0.0,
+                        help='训练时差分重建项权重（0=不启用，MSL建议 0.1~1.0，需重训练）')
 
     config = parser.parse_args()
 

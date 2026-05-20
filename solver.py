@@ -9,6 +9,16 @@ from model.AnomalyTransformer import AnomalyTransformer
 from data_factory.data_loader import get_loader_segment
 
 
+def _local_zscore(arr, half_win):
+    """滑动窗口局部 z-score，用 numpy 卷积实现，O(n)。"""
+    w = 2 * half_win + 1
+    kernel = np.ones(w) / w
+    mu   = np.convolve(arr,      kernel, mode='same')
+    sq_mu = np.convolve(arr ** 2, kernel, mode='same')
+    var  = np.maximum(sq_mu - mu ** 2, 0.0)
+    return (arr - mu) / (np.sqrt(var) + 1e-8)
+
+
 def my_kl_loss(p, q):
     res = p * (torch.log(p + 0.0001) - torch.log(q + 0.0001))
     return torch.mean(torch.sum(res, dim=-1), dim=1)
@@ -159,6 +169,10 @@ class Solver(object):
 
         print("======================TRAIN MODE======================")
 
+        _lambda_diff = float(getattr(self, 'lambda_diff', 0.0))
+        if _lambda_diff > 0:
+            print(f"[训练增强] lambda_diff={_lambda_diff}（差分重建正则项已启用）")
+
         time_now = time.time()
         path = self.model_save_path
         if not os.path.exists(path):
@@ -207,6 +221,10 @@ class Solver(object):
                 prior_loss = prior_loss / len(prior)
 
                 rec_loss = self.criterion(output, input)
+                if _lambda_diff > 0:
+                    _di = input[:, 1:, :] - input[:, :-1, :]
+                    _do = output[:, 1:, :] - output[:, :-1, :]
+                    rec_loss = rec_loss + _lambda_diff * self.criterion(_di, _do)
 
                 loss1_list.append((rec_loss - self.k * series_loss).item())
                 loss1 = rec_loss - self.k * series_loss
@@ -249,11 +267,14 @@ class Solver(object):
 
         criterion = nn.MSELoss(reduce=False)
         # 测试评分策略参数（无需重训练）
-        _smode  = getattr(self, 'score_mode',    'combined')
-        _salpha = float(getattr(self, 'score_alpha',   1.0))
-        _smooth = int(getattr(self, 'score_smooth_k',  1))
-        if _smode != 'combined' or _smooth > 1:
-            print(f"[评分策略] mode={_smode},  alpha={_salpha},  smooth_k={_smooth}")
+        _smode       = getattr(self, 'score_mode',       'combined')
+        _salpha      = float(getattr(self, 'score_alpha',      1.0))
+        _smooth      = int(getattr(self,   'score_smooth_k',   1))
+        _diff_beta   = float(getattr(self, 'diff_beta',        0.0))
+        _local_z_win = int(getattr(self,   'score_local_z_win', 0))
+        if _smode != 'combined' or _smooth > 1 or _diff_beta > 0 or _local_z_win > 1:
+            print(f"[评分策略] mode={_smode},  alpha={_salpha},  smooth_k={_smooth},  "
+                  f"diff_beta={_diff_beta},  local_z_win={_local_z_win}")
 
         # chan_var 模式：在训练集上估计每个通道重建误差的方差，
         # 以方差倒数作为通道权重 w_c ∝ 1/(Var_c + ε)，归一化后加权求和。
@@ -330,6 +351,11 @@ class Solver(object):
                 score = _salpha * loss + (1.0 - _salpha) * kl_score
             else:
                 score = kl_score + loss
+            if _diff_beta > 0:
+                _dr = criterion(input[:, 1:, :] - input[:, :-1, :],
+                                output[:, 1:, :] - output[:, :-1, :])
+                _dr = torch.cat([torch.zeros(_dr.shape[0], 1, _dr.shape[2], device=input.device), _dr], dim=1)
+                score = score + _diff_beta * torch.max(_dr, dim=-1).values
             cri = score.detach().cpu().numpy()
             attens_energy.append(cri)
 
@@ -337,6 +363,8 @@ class Solver(object):
         train_energy = np.array(attens_energy)
         if _smooth > 1:
             train_energy = np.convolve(train_energy, np.ones(_smooth) / _smooth, mode='same')
+        if _local_z_win > 1:
+            train_energy = _local_zscore(train_energy, _local_z_win)
 
         # (2) find the threshold
         attens_energy = []
@@ -380,6 +408,11 @@ class Solver(object):
                 score = _salpha * loss + (1.0 - _salpha) * kl_score
             else:
                 score = kl_score + loss
+            if _diff_beta > 0:
+                _dr = criterion(input[:, 1:, :] - input[:, :-1, :],
+                                output[:, 1:, :] - output[:, :-1, :])
+                _dr = torch.cat([torch.zeros(_dr.shape[0], 1, _dr.shape[2], device=input.device), _dr], dim=1)
+                score = score + _diff_beta * torch.max(_dr, dim=-1).values
             cri = score.detach().cpu().numpy()
             attens_energy.append(cri)
 
@@ -387,6 +420,8 @@ class Solver(object):
         test_energy = np.array(attens_energy)
         if _smooth > 1:
             test_energy = np.convolve(test_energy, np.ones(_smooth) / _smooth, mode='same')
+        if _local_z_win > 1:
+            test_energy = _local_zscore(test_energy, _local_z_win)
         combined_energy = np.concatenate([train_energy, test_energy], axis=0)
         thresh = np.percentile(combined_energy, 100 - self.anormly_ratio)
         print("Threshold :", thresh)
@@ -434,6 +469,11 @@ class Solver(object):
                 score = _salpha * loss + (1.0 - _salpha) * kl_score
             else:
                 score = kl_score + loss
+            if _diff_beta > 0:
+                _dr = criterion(input[:, 1:, :] - input[:, :-1, :],
+                                output[:, 1:, :] - output[:, :-1, :])
+                _dr = torch.cat([torch.zeros(_dr.shape[0], 1, _dr.shape[2], device=input.device), _dr], dim=1)
+                score = score + _diff_beta * torch.max(_dr, dim=-1).values
 
             cri = score.detach().cpu().numpy()
             attens_energy.append(cri)
@@ -444,6 +484,8 @@ class Solver(object):
         test_energy = np.array(attens_energy)
         if _smooth > 1:
             test_energy = np.convolve(test_energy, np.ones(_smooth) / _smooth, mode='same')
+        if _local_z_win > 1:
+            test_energy = _local_zscore(test_energy, _local_z_win)
         test_labels = np.array(test_labels)
 
         pred = (test_energy > thresh).astype(int)
