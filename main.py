@@ -106,7 +106,33 @@ if __name__ == '__main__':
     parser.add_argument('--lambda_diff', type=float, default=0.0,
                         help='训练时差分重建项权重（0=不启用，MSL建议 0.1~1.0，需重训练）')
 
+    # === 方案1+3 新增参数 ===
+    parser.add_argument('--dropout', type=float, default=0.0,
+                        help='Dropout rate (0.0=原始, 小数据集如SKAB建议0.2-0.3)')
+    parser.add_argument('--temperature', type=float, default=50.0,
+                        help='异常分数放大温度 (默认50, MSL/SKAB可尝试20-30)')
+    parser.add_argument('--score_mode', type=str, default='assoc+recon',
+                        choices=['assoc+recon', 'recon_only', 'assoc_only'],
+                        help='异常分数组合: assoc+recon=当前默认, recon_only=仅重构, assoc_only=仅关联差异')
+    parser.add_argument('--d_model', type=int, default=512,
+                        help='Transformer d_model (HAI=512, MSL=256, SKAB=128)')
+
     config = parser.parse_args()
+
+    # 数据集感知的默认参数覆盖（仅当用户没有显式指定时生效）
+    # 通过检查参数是否仍为原始默认值来做，简单有效
+    _DATASET_OVERRIDES = {
+        'HAI':  {'anormly_ratio': 1.0, 'num_epochs': 10},
+        'MSL':  {'anormly_ratio': 10.0, 'num_epochs': 20, 'dropout': 0.1, 'd_model': 256},
+        'SKAB': {'anormly_ratio': 5.0, 'num_epochs': 15, 'dropout': 0.2, 'd_model': 128},
+    }
+    if config.dataset in _DATASET_OVERRIDES:
+        for k, v in _DATASET_OVERRIDES[config.dataset].items():
+            # 只覆盖仍为原始默认值的参数
+            orig_default = parser.get_default(k)
+            if getattr(config, k) == orig_default:
+                setattr(config, k, v)
+                print(f'[Auto] {k} overridden to {v} for dataset={config.dataset}')
 
     # dgr_mode 覆盖 use_dgr_prior，保证两者一致
     if config.dgr_mode != 'none':
