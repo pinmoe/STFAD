@@ -165,6 +165,47 @@ class Solver(object):
 
         return np.average(loss_1), np.average(loss_2)
 
+    # ---------------------------------------------------------------------- #
+    # 记忆库：净化 DGR 先验中的异常污染
+    # 适用场景：高异常率数据集（如 ST330IR001_CP001 45.93%），
+    #           动态 DGR 先验从输入实时计算，异常样本会污染先验分布。
+    # 方法：训练后从 train_loader 中选取重建误差最低的前 50% 样本，
+    #       用这些"干净正常样本"计算平均先验，推理时替换被污染的实时先验。
+    # ---------------------------------------------------------------------- #
+
+    def _build_memory_bank(self, max_samples: int = 512):
+        """收集训练集中重建误差最低的样本作为正常记忆库。"""
+        _crit = nn.MSELoss(reduction='none')
+        all_inputs, all_errors = [], []
+        self.model.eval()
+        with torch.no_grad():
+            for batch in self.train_loader:
+                inp = batch[0].float().to(self.device)
+                out, _, _, _ = self.model(inp)
+                err = _crit(inp, out).mean(dim=(1, 2)).cpu()  # (B,) 每样本均值误差
+                all_inputs.append(inp.cpu())
+                all_errors.append(err)
+        all_inputs = torch.cat(all_inputs, dim=0)   # (N, W, C)
+        all_errors = torch.cat(all_errors, dim=0)   # (N,)
+        n_keep = min(max_samples, max(len(all_errors) // 2, 1))
+        _, idx = all_errors.topk(n_keep, largest=False)
+        thresh_err = all_errors[idx[-1]].item()
+        print(f"[MemoryBank] 保留 {n_keep}/{len(all_errors)} 个低误差样本，"
+              f"误差阈值: {thresh_err:.4f}")
+        return all_inputs[idx]  # (n_keep, W, C)
+
+    def _compute_mb_prior(self, memory_bank):
+        """用记忆库样本计算 DGR 先验，batch 维取均值，返回每层固定先验列表。"""
+        n = len(memory_bank)
+        bs = min(self.batch_size, n)
+        idx = torch.randperm(n)[:bs]
+        mb_inp = memory_bank[idx].to(self.device)
+        self.model.eval()
+        with torch.no_grad():
+            _, _, mb_prior, _ = self.model(mb_inp)
+        # 对 batch 维平均，得 (1, H, W, W)，推理时 expand 到实际 batch size
+        return [p.mean(dim=0, keepdim=True).detach() for p in mb_prior]
+
     def train(self):
 
         print("======================TRAIN MODE======================")
@@ -265,6 +306,16 @@ class Solver(object):
 
         print("======================TEST MODE======================")
 
+        # 记忆库先验净化（仅对 dynamic/multiscale/dynamic_pe 有效）
+        _dgr_mode = getattr(self, 'dgr_mode', 'none')
+        _use_mb   = getattr(self, 'use_memory_bank', False)
+        _mb_prior = None
+        if _use_mb and _dgr_mode in ('dynamic', 'multiscale', 'dynamic_pe'):
+            print("[MemoryBank] 正在构建正常样本记忆库...")
+            _memory_bank = self._build_memory_bank()
+            _mb_prior    = self._compute_mb_prior(_memory_bank)
+            print(f"[MemoryBank] 清洁先验构建完成，共 {len(_mb_prior)} 层")
+
         criterion = nn.MSELoss(reduce=False)
         # 测试评分策略参数（无需重训练）
         _smode       = getattr(self, 'score_mode',       'combined')
@@ -317,6 +368,8 @@ class Solver(object):
             input_data = batch[0]
             input = input_data.float().to(self.device)
             output, series, prior, _ = self.model(input)
+            if _mb_prior is not None:
+                prior = [p.expand(input.shape[0], -1, -1, -1) for p in _mb_prior]
             _rec = criterion(input, output)
             if _smode == 'chan_var':
                 loss = (_rec * chan_w.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
@@ -372,6 +425,8 @@ class Solver(object):
             input_data = batch[0]
             input = input_data.float().to(self.device)
             output, series, prior, _ = self.model(input)
+            if _mb_prior is not None:
+                prior = [p.expand(input.shape[0], -1, -1, -1) for p in _mb_prior]
 
             _rec = criterion(input, output)
             if _smode == 'chan_var':
@@ -434,6 +489,8 @@ class Solver(object):
             labels = batch[1]
             input = input_data.float().to(self.device)
             output, series, prior, _ = self.model(input)
+            if _mb_prior is not None:
+                prior = [p.expand(input.shape[0], -1, -1, -1) for p in _mb_prior]
 
             _rec = criterion(input, output)
             if _smode == 'chan_var':
@@ -489,6 +546,7 @@ class Solver(object):
         test_labels = np.array(test_labels)
 
         pred = (test_energy > thresh).astype(int)
+        pred_raw = pred.copy()  # PA 调整前，用于逐点指标和 AUPRC
 
         gt = test_labels.astype(int)
 
@@ -531,5 +589,41 @@ class Solver(object):
             "Accuracy : {:0.4f}, Precision : {:0.4f}, Recall : {:0.4f}, F-score : {:0.4f} ".format(
                 accuracy, precision,
                 recall, f_score))
+
+        # ---- 补充评估指标（无需 PA 的更严格视角）----
+        from utils.eval_metrics import pointwise_metrics, compute_auprc, event_level_metrics
+        pw = pointwise_metrics(gt, pred_raw)
+        print("[逐点(无PA)] Precision: {:.4f}, Recall: {:.4f}, F1: {:.4f}".format(
+            pw['precision'], pw['recall'], pw['f1']))
+        try:
+            auprc = compute_auprc(gt, test_energy)
+            print("[AUPRC]      {:.4f}  (不依赖阈值，越高越好)".format(auprc))
+        except Exception:
+            pass
+        ev = event_level_metrics(gt, pred)
+        print("[事件级(PA)] Precision: {:.4f}, Recall: {:.4f}, F1: {:.4f}".format(
+            ev['event_precision'], ev['event_recall'], ev['event_f1']))
+
+        # ---- 窗口级评估（固定窗口数据集专用，如 ST330IR001_CP001）----
+        # 每条样本本身就是一个完整窗口，点级 AUPRC 噪声很大（窗口内各步骤得分不同）。
+        # 窗口级评估：对窗口内所有步骤的异常分数取均值 → 1 个窗口分 → 与窗口标签比较。
+        if self.win_size > 1 and len(test_energy) % self.win_size == 0:
+            n_win = len(test_energy) // self.win_size
+            win_scores = test_energy.reshape(n_win, self.win_size).mean(axis=1)
+            win_labels = test_labels.reshape(n_win, self.win_size).max(axis=1).astype(int)
+            n_anom_win = win_labels.sum()
+            if 0 < n_anom_win < len(win_labels):
+                try:
+                    win_auprc = compute_auprc(win_labels, win_scores)
+                    print("[窗口级AUPRC] {:.4f}  (n_windows={}, anomaly_windows={})".format(
+                        win_auprc, n_win, int(n_anom_win)))
+                    # 窗口级 F1：阈值取与 anormly_ratio 一致的百分位
+                    win_thresh = np.percentile(win_scores, 100 - self.anormly_ratio)
+                    win_pred = (win_scores > win_thresh).astype(int)
+                    win_pw = pointwise_metrics(win_labels, win_pred)
+                    print("[窗口级F1]   Precision: {:.4f}, Recall: {:.4f}, F1: {:.4f}".format(
+                        win_pw['precision'], win_pw['recall'], win_pw['f1']))
+                except Exception:
+                    pass
 
         return accuracy, precision, recall, f_score

@@ -106,6 +106,11 @@ if __name__ == '__main__':
     parser.add_argument('--lambda_diff', type=float, default=0.0,
                         help='训练时差分重建项权重（0=不启用，MSL建议 0.1~1.0，需重训练）')
 
+    # 记忆库先验净化：从训练集中选取低重建误差的正常样本，替代被异常污染的实时先验。
+    # 对高异常率数据集（如 ST330IR001_CP001 45.93%）尤其有效，配合 dynamic/multiscale 使用。
+    parser.add_argument('--use_memory_bank', type=str2bool, default='false',
+                        help='是否启用正常样本记忆库净化 DGR 先验（仅对 dynamic/multiscale 有效）')
+
     # === 方案1+3 新增参数 ===
     parser.add_argument('--dropout', type=float, default=0.0,
                         help='Dropout rate (0.0=原始, 小数据集如SKAB建议0.2-0.3)')
