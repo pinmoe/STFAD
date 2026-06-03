@@ -37,6 +37,7 @@ Current data loaders support:
 - PSM
 - BATADAL
 - SMD
+- ST330IR001_CP001
 
 The main large-scale scripts in this branch focus on MSL/SMAP/SKAB, while dedicated preprocessing/utilities are provided for HAI and BATADAL.
 
@@ -57,6 +58,12 @@ python scripts/prepare_hai.py --data_dir data/HAI/hai-22.04 --output_dir data/HA
 - BATADAL:
 ```bash
 python scripts/prepare_batadal.py --src_dir <raw_csv_dir> --dst_dir data/BATADAL
+```
+- ST330IR001.CP001:
+```bash
+python scripts/prepare_st330ir001_cp001.py --src_dir data/ST330IR001.CP001 --dst_dir data/ST330IR001.CP001
+python main.py --mode train --dataset ST330IR001_CP001 --data_path data/ST330IR001.CP001 --win_size 56 --input_c 29 --output_c 29 --anormly_ratio 45.93 --model_save_path checkpoints/E1_ST330IR001_CP001
+python main.py --mode test  --dataset ST330IR001_CP001 --data_path data/ST330IR001.CP001 --win_size 56 --input_c 29 --output_c 29 --anormly_ratio 45.93 --model_save_path checkpoints/E1_ST330IR001_CP001
 ```
 
 ## Main Experimental Protocol

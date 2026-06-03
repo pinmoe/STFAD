@@ -364,6 +364,70 @@ class BATADALSegLoader(object):
                 np.float32(self.test_labels[base : base + self.win_size]),
             )
 
+
+class ST330IR001CP001SegLoader(object):
+    """
+    Loader for the ST330IR001.CP001 welding-gun fault dataset.
+
+    The raw dataset is organized as one fixed-length window per CSV file.
+    scripts/prepare_st330ir001_cp001.py converts it to:
+      {data_path}/ST330IR001_CP001_train.npy       shape (N_train, 56, 29)
+      {data_path}/ST330IR001_CP001_test.npy        shape (N_test, 56, 29)
+      {data_path}/ST330IR001_CP001_test_label.npy  shape (N_test, 56, 1)
+    """
+
+    prefix = "ST330IR001_CP001"
+
+    def __init__(self, data_path, win_size, step, mode="train"):
+        self.mode = mode
+        self.step = step
+        self.win_size = win_size
+        self.scaler = StandardScaler()
+
+        train_data = np.load(os.path.join(data_path, self.prefix + "_train.npy")).astype(np.float32)
+        test_data = np.load(os.path.join(data_path, self.prefix + "_test.npy")).astype(np.float32)
+        test_labels = np.load(os.path.join(data_path, self.prefix + "_test_label.npy")).astype(np.float32)
+
+        if train_data.ndim != 3 or test_data.ndim != 3:
+            raise ValueError("ST330IR001_CP001 arrays must have shape (N, win_size, C).")
+        if test_labels.ndim == 2:
+            test_labels = test_labels[:, :, None]
+        if test_labels.shape[:2] != test_data.shape[:2]:
+            raise ValueError("ST330IR001_CP001 labels must match test data windows and length.")
+        if train_data.shape[1] != win_size or test_data.shape[1] != win_size:
+            raise ValueError(
+                f"ST330IR001_CP001 uses fixed windows of {train_data.shape[1]} rows. "
+                f"Run with --win_size {train_data.shape[1]}."
+            )
+
+        n_features = train_data.shape[-1]
+        self.scaler.fit(train_data.reshape(-1, n_features))
+        self.train = self.scaler.transform(train_data.reshape(-1, n_features)).reshape(train_data.shape)
+        self.test = self.scaler.transform(test_data.reshape(-1, n_features)).reshape(test_data.shape)
+        self.val = self.test
+        self.test_labels = test_labels
+
+        print("train:", self.train.shape)
+        print("test: ", self.test.shape)
+        print(f"test anomaly ratio: {self.test_labels.mean()*100:.2f}%")
+
+    def __len__(self):
+        if self.mode == "train":
+            return self.train.shape[0]
+        return self.test.shape[0]
+
+    def __getitem__(self, index):
+        if self.mode == "train":
+            return (
+                np.float32(self.train[index]),
+                np.zeros((self.win_size, 1), dtype=np.float32),
+            )
+        return (
+            np.float32(self.test[index]),
+            np.float32(self.test_labels[index]),
+        )
+
+
 def get_loader_segment(data_path, batch_size, win_size=100, step=100, mode='train', dataset='KDD'):
     if (dataset == 'SMD'):
         dataset = SMDSegLoader(data_path, win_size, step, mode)
@@ -379,6 +443,8 @@ def get_loader_segment(data_path, batch_size, win_size=100, step=100, mode='trai
         dataset = PSMSegLoader(data_path, win_size, 1, mode)
     elif dataset == 'BATADAL':
         dataset = BATADALSegLoader(data_path, win_size, 1, mode)
+    elif dataset in ('ST330IR001_CP001', 'ST330IR001.CP001'):
+        dataset = ST330IR001CP001SegLoader(data_path, win_size, 1, mode)
 
     shuffle = False
     if mode == 'train':

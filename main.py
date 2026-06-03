@@ -111,9 +111,6 @@ if __name__ == '__main__':
                         help='Dropout rate (0.0=原始, 小数据集如SKAB建议0.2-0.3)')
     parser.add_argument('--temperature', type=float, default=50.0,
                         help='异常分数放大温度 (默认50, MSL/SKAB可尝试20-30)')
-    parser.add_argument('--score_mode', type=str, default='assoc+recon',
-                        choices=['assoc+recon', 'recon_only', 'assoc_only'],
-                        help='异常分数组合: assoc+recon=当前默认, recon_only=仅重构, assoc_only=仅关联差异')
     parser.add_argument('--d_model', type=int, default=512,
                         help='Transformer d_model (HAI=512, MSL=256, SKAB=128)')
 
@@ -125,6 +122,13 @@ if __name__ == '__main__':
         'HAI':  {'anormly_ratio': 1.0, 'num_epochs': 10},
         'MSL':  {'anormly_ratio': 10.0, 'num_epochs': 20, 'dropout': 0.1, 'd_model': 256},
         'SKAB': {'anormly_ratio': 5.0, 'num_epochs': 15, 'dropout': 0.2, 'd_model': 128},
+        'ST330IR001_CP001': {
+            'anormly_ratio': 45.93,
+            'win_size': 56,
+            'input_c': 29,
+            'output_c': 29,
+            'd_model': 128,
+        },
     }
     if config.dataset in _DATASET_OVERRIDES:
         for k, v in _DATASET_OVERRIDES[config.dataset].items():
