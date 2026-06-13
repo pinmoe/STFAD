@@ -132,13 +132,19 @@ dmypy.json
 .claude/
 REWRITE_PROMPT_final.md
 
-# data & checkpoints & tools
+# data & checkpoints
 data/
 checkpoints/
 results/
 diagnostics/
 logs/
-tools/
+documents/
+
+# scripts
+scripts/
+
+# figures
 figures/
-analysis_optimization_guide.md
-run_all_experiments.sh
+tools/
+
+.vscode/

@@ -1,43 +1,157 @@
-# Anomaly-Transformer (ICLR 2022 Spotlight)
+# Anomaly-Transformer (Research Extension)
 Anomaly Transformer: Time Series Anomaly Detection with Association Discrepancy
 
-Unsupervised detection of anomaly points in time series is a challenging problem, which requires the model to learn informative representation and derive a distinguishable criterion. In this paper, we propose the Anomaly Transformer in these three folds:
+This repository extends the original ICLR 2022 Anomaly Transformer implementation into a broader experimental framework for industrial and spacecraft time-series anomaly detection. In addition to the original Association Discrepancy objective, this branch introduces:
 
-- An inherent distinguishable criterion as **Association Discrepancy** for detection.
-- A new **Anomaly-Attention** mechanism to compute the association discrepancy.
-- A **minimax strategy** to amplify the normal-abnormal distinguishability of the association discrepancy.
+- multiple prior construction modes (`dgr_mode`),
+- explicit prior fusion strategies (`prior_fusion`),
+- and post-hoc/training-time scoring enhancements for ablation studies.
 
 <p align="center">
-<img src=".\pics\structure.png" height = "350" alt="" align=center />
+<img src=".\pics\structure.png" height="350" alt="Anomaly Transformer" align="center" />
 </p>
 
 ## Get Started
 
-1. Install Python 3.6, PyTorch >= 1.4.0. 
-(Thanks Élise for the contribution in solving the environment. See this [issue](https://github.com/thuml/Anomaly-Transformer/issues/11) for details.)
-2. Download data. You can obtain four benchmarks from [Google Cloud](https://drive.google.com/drive/folders/1gisthCoE-RrKJ0j3KPV7xiibhHWT9qRm?usp=sharing). **All the datasets are well pre-processed**. For the SWaT dataset, you can apply for it by following its official tutorial.
-3. Train and evaluate. We provide the experiment scripts of all benchmarks under the folder `./scripts`. You can reproduce the experiment results as follows:
+1. Install Python and dependencies (PyTorch, NumPy, pandas, scikit-learn, matplotlib).
 ```bash
-bash ./scripts/SMD.sh
-bash ./scripts/MSL.sh
-bash ./scripts/SMAP.sh
-bash ./scripts/PSM.sh
+pip install torch numpy pandas scikit-learn matplotlib
+```
+2. Prepare datasets under `data/` in `.npy` format.
+3. Train and evaluate using either single-run commands or batch scripts.
+
+Example (MSL, baseline E1):
+```bash
+python main.py --mode train --dataset MSL --data_path data/MSL --input_c 55 --output_c 55 --dgr_mode none --model_save_path checkpoints/E1_MSL
+python main.py --mode test  --dataset MSL --data_path data/MSL --input_c 55 --output_c 55 --dgr_mode none --model_save_path checkpoints/E1_MSL
 ```
 
-Especially, we use the adjustment operation proposed by [Xu et al, 2018](https://arxiv.org/pdf/1802.03903.pdf) for model evaluation. If you have questions about this, please see this [issue](https://github.com/thuml/Anomaly-Transformer/issues/14) or email us.
+## Supported Datasets
 
-## Main Result
+Current data loaders support:
 
-We compare our model with 15 baselines, including THOC, InterFusion, etc. **Generally,  Anomaly-Transformer achieves SOTA.**
+- MSL
+- SMAP
+- SKAB
+- HAI
+- PSM
+- BATADAL
+- SMD
+- ST330IR001_CP001
 
-<p align="center">
-<img src=".\pics\result.png" height = "450" alt="" align=center />
-</p>
+The main large-scale scripts in this branch focus on MSL/SMAP/SKAB, while dedicated preprocessing/utilities are provided for HAI and BATADAL.
+
+## Data Preparation
+
+If preprocessed arrays are available, use the following naming convention:
+
+- `data/<DATASET>/<DATASET>_train.npy`
+- `data/<DATASET>/<DATASET>_test.npy`
+- `data/<DATASET>/<DATASET>_test_label.npy`
+
+For raw-data conversion:
+
+- HAI:
+```bash
+python scripts/prepare_hai.py --data_dir data/HAI/hai-22.04 --output_dir data/HAI
+```
+- BATADAL:
+```bash
+python scripts/prepare_batadal.py --src_dir <raw_csv_dir> --dst_dir data/BATADAL
+```
+- ST330IR001.CP001:
+```bash
+python scripts/prepare_st330ir001_cp001.py --src_dir data/ST330IR001.CP001 --dst_dir data/ST330IR001.CP001
+python main.py --mode train --dataset ST330IR001_CP001 --data_path data/ST330IR001.CP001 --win_size 56 --input_c 29 --output_c 29 --anormly_ratio 45.93 --model_save_path checkpoints/E1_ST330IR001_CP001
+python main.py --mode test  --dataset ST330IR001_CP001 --data_path data/ST330IR001.CP001 --win_size 56 --input_c 29 --output_c 29 --anormly_ratio 45.93 --model_save_path checkpoints/E1_ST330IR001_CP001
+```
+
+## Main Experimental Protocol
+
+This branch organizes experiments into two groups.
+
+### E/B Series (model/prior design)
+
+Run all E1-E5 and B1-B3 experiments:
+```bash
+bash scripts/run_all_experiments.sh
+```
+
+Definitions:
+
+- E1: Gaussian prior (`dgr_mode=none`)
+- E2: Dynamic DGR prior (`dgr_mode=dynamic`)
+- E3: Multi-scale dynamic DGR prior (`dgr_mode=multiscale`)
+- E4: Static learnable DGR prior (`dgr_mode=static`)
+- E5: Sigma-offset prior (`dgr_mode=sigma_offset`)
+- B1: Dynamic prior + blend fusion (fixed alpha)
+- B2: Dynamic prior + blend fusion (learnable alpha)
+- B3: Dynamic prior + entropy-gated fusion
+
+### A/B/C Series (scoring/training ablations)
+
+Run ablations for Direction A/B/C:
+```bash
+bash run_abc_experiments.sh
+```
+
+- A: differential reconstruction auxiliary scoring (`diff_beta`, test-time only)
+- B: local z-score post-processing (`score_local_z_win`, test-time only)
+- C: differential reconstruction regularization (`lambda_diff`, training-time)
+
+## Key Arguments
+
+Prior construction and fusion:
+
+- `--dgr_mode`: `none | dynamic | multiscale | static | sigma_offset | dynamic_pe`
+- `--prior_fusion`: `replace | blend | entropy_gate`
+- `--prior_alpha`, `--prior_alpha_learnable`
+- `--dgr_input_mode`: `raw | smoothed`
+- `--dgr_feature_mode`: `diff | raw`
+- `--prior_entropy_tau`, `--prior_entropy_gamma`
+
+Scoring and post-processing:
+
+- `--score_mode`: `combined | rec_only | rec_mean | weighted | chan_var`
+- `--score_alpha`
+- `--score_smooth_k`
+- `--diff_beta`
+- `--score_local_z_win`
+
+Training enhancement:
+
+- `--lambda_diff`
+
+## Diagnostics and Figures
+
+Generate the full paper-style figure suite:
+```bash
+python tools/make_all_figures.py
+```
+Outputs are saved to `figures/paper/`.
+
+PRC/AUPRC diagnostics (E1 vs E4):
+```bash
+python diagnostics/plot_prc.py --dataset MSL --e1_ckpt checkpoints/E1_MSL --e4_ckpt checkpoints/E4_MSL
+```
+Outputs are saved to `diagnostics/`.
+
+## Repository Structure
+
+- `main.py`: argument parser and entry point
+- `solver.py`: training, validation, and test pipeline
+- `model/`: Anomaly Transformer and prior modules
+- `data_factory/data_loader.py`: dataset loaders
+- `scripts/`: preprocessing and experiment scripts
+- `tools/`: plotting utilities
+- `diagnostics/`: analysis scripts
+- `checkpoints/`: saved model weights
+- `logs/`: experiment logs
 
 ## Citation
-If you find this repo useful, please cite our paper. 
+If you find this repository useful, please cite the original paper:
 
-```
+```bibtex
 @inproceedings{
 xu2022anomaly,
 title={Anomaly Transformer: Time Series Anomaly Detection with Association Discrepancy},
@@ -49,4 +163,4 @@ url={https://openreview.net/forum?id=LzQQ89U1qm_}
 ```
 
 ## Contact
-If you have any question, please contact wuhx23@mails.tsinghua.edu.cn.
+For questions regarding the original Anomaly Transformer paper, please contact the original authors.

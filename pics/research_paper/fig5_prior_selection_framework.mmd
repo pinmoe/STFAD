@@ -1,0 +1,14 @@
+flowchart LR
+    A["目标场景"] -->|点突变| B["点突变型异常"]
+    A -->|持续偏移| C["持续偏移型异常"]
+    A -->|高异常率| D["高异常率工业监测"]
+    B -->|局部差分敏感| E["DGR-diff 评分"]
+    C -->|趋势偏移稳健| F["DGR-raw + blend 评分"]
+    D -->|重构均值稳定| G["DGR-raw + rec_mean 评分"]
+
+    classDef root fill:#e4f0e6,stroke:#5d8367,color:#111111,stroke-width:1px;
+    classDef scene fill:#e7f0f7,stroke:#6f90a8,color:#111111,stroke-width:1px;
+    classDef output fill:#f7ead8,stroke:#b69262,color:#111111,stroke-width:1px;
+    class A root;
+    class B,C,D scene;
+    class E,F,G output;
