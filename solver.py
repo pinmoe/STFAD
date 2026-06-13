@@ -19,6 +19,24 @@ def _local_zscore(arr, half_win):
     return (arr - mu) / (np.sqrt(var) + 1e-8)
 
 
+def _aggregate_window_scores(step_scores, win_size, mode="mean", topk_ratio=0.2):
+    windows = step_scores.reshape(-1, win_size)
+    if mode == "mean":
+        return windows.mean(axis=1)
+    if mode == "max":
+        return windows.max(axis=1)
+    if mode == "median":
+        return np.median(windows, axis=1)
+    if mode == "p95":
+        return np.percentile(windows, 95, axis=1)
+    if mode == "topk_mean":
+        k = int(np.ceil(win_size * topk_ratio))
+        k = max(1, min(win_size, k))
+        topk = np.partition(windows, -k, axis=1)[:, -k:]
+        return topk.mean(axis=1)
+    raise ValueError(f"Unknown window_score_mode: {mode}")
+
+
 def my_kl_loss(p, q):
     res = p * (torch.log(p + 0.0001) - torch.log(q + 0.0001))
     return torch.mean(torch.sum(res, dim=-1), dim=1)
@@ -545,6 +563,26 @@ class Solver(object):
             test_energy = _local_zscore(test_energy, _local_z_win)
         test_labels = np.array(test_labels)
 
+        export_score_path = getattr(self, 'export_score_path', '')
+        if export_score_path:
+            export_score_dir = os.path.dirname(export_score_path)
+            if export_score_dir:
+                os.makedirs(export_score_dir, exist_ok=True)
+            np.savez(
+                export_score_path,
+                score=test_energy,
+                label=test_labels.astype(int),
+                threshold=float(thresh),
+                dataset=self.dataset,
+                score_mode=_smode,
+                score_alpha=_salpha,
+                score_smooth_k=_smooth,
+                diff_beta=_diff_beta,
+                score_local_z_win=_local_z_win,
+                win_size=self.win_size,
+            )
+            print(f"[Export] Saved test scores to {export_score_path}")
+
         pred = (test_energy > thresh).astype(int)
         pred_raw = pred.copy()  # PA 调整前，用于逐点指标和 AUPRC
 
@@ -609,21 +647,44 @@ class Solver(object):
         # 窗口级评估：对窗口内所有步骤的异常分数取均值 → 1 个窗口分 → 与窗口标签比较。
         if self.win_size > 1 and len(test_energy) % self.win_size == 0:
             n_win = len(test_energy) // self.win_size
-            win_scores = test_energy.reshape(n_win, self.win_size).mean(axis=1)
             win_labels = test_labels.reshape(n_win, self.win_size).max(axis=1).astype(int)
             n_anom_win = win_labels.sum()
             if 0 < n_anom_win < len(win_labels):
                 try:
-                    win_auprc = compute_auprc(win_labels, win_scores)
-                    print("[窗口级AUPRC] {:.4f}  (n_windows={}, anomaly_windows={})".format(
-                        win_auprc, n_win, int(n_anom_win)))
-                    # 窗口级 F1：阈值取与 anormly_ratio 一致的百分位
-                    win_thresh = np.percentile(win_scores, 100 - self.anormly_ratio)
-                    win_pred = (win_scores > win_thresh).astype(int)
-                    win_pw = pointwise_metrics(win_labels, win_pred)
-                    print("[窗口级F1]   Precision: {:.4f}, Recall: {:.4f}, F1: {:.4f}".format(
-                        win_pw['precision'], win_pw['recall'], win_pw['f1']))
+                    win_mode = getattr(self, 'window_score_mode', 'mean')
+                    win_topk_ratio = float(getattr(self, 'window_topk_ratio', 0.2))
+                    win_ratio = getattr(self, 'window_anormly_ratio', None)
+                    if win_ratio is None:
+                        win_ratio = self.anormly_ratio
+                    win_ratio = float(win_ratio)
+                    ratio_values = [win_ratio]
+                    ratio_sweep = getattr(self, 'window_ratio_sweep', '')
+                    if ratio_sweep:
+                        ratio_values = []
+                        for item in str(ratio_sweep).split(','):
+                            item = item.strip()
+                            if item:
+                                ratio_values.append(float(item))
+
+                    def _print_window_metrics(mode, ratio):
+                        mode_scores = _aggregate_window_scores(
+                            test_energy, self.win_size, mode=mode, topk_ratio=win_topk_ratio
+                        )
+                        mode_auprc = compute_auprc(win_labels, mode_scores)
+                        mode_thresh = np.percentile(mode_scores, 100 - ratio)
+                        mode_pred = (mode_scores > mode_thresh).astype(int)
+                        mode_pw = pointwise_metrics(win_labels, mode_pred)
+                        print("[Window] mode={} ratio={:.2f} AUPRC={:.4f} Precision={:.4f} Recall={:.4f} F1={:.4f} "
+                              "(n_windows={}, anomaly_windows={})".format(
+                                  mode, ratio, mode_auprc, mode_pw['precision'], mode_pw['recall'],
+                                  mode_pw['f1'], n_win, int(n_anom_win)))
+
+                    for _ratio in ratio_values:
+                        _print_window_metrics(win_mode, _ratio)
+                    if getattr(self, 'window_score_sweep', False):
+                        for _mode in ['mean', 'max', 'topk_mean', 'median', 'p95']:
+                            if _mode != win_mode:
+                                _print_window_metrics(_mode, win_ratio)
                 except Exception:
                     pass
-
         return accuracy, precision, recall, f_score

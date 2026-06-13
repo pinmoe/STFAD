@@ -103,6 +103,19 @@ if __name__ == '__main__':
     parser.add_argument('--score_local_z_win', type=int, default=0,
                         help='局部z-score半窗口大小（0=不启用，MSL建议 200~500）')
     # 训练时差分重建项（方向C）：显式训练模型正确重建局部变化，需重训练
+    parser.add_argument('--window_score_mode', type=str, default='mean',
+                        choices=['mean', 'max', 'topk_mean', 'median', 'p95'],
+                        help='Window-level aggregation for fixed-window datasets such as ST330IR001_CP001')
+    parser.add_argument('--window_topk_ratio', type=float, default=0.2,
+                        help='Ratio of points used by window_score_mode=topk_mean')
+    parser.add_argument('--window_anormly_ratio', type=float, default=None,
+                        help='Window-level threshold ratio. Defaults to anormly_ratio when omitted.')
+    parser.add_argument('--window_ratio_sweep', type=str, default='',
+                        help='Comma-separated window threshold ratios to print, for example 35,40,45.93,50')
+    parser.add_argument('--window_score_sweep', type=str2bool, default='false',
+                        help='Print window-level metrics for all aggregation modes in one test run')
+    parser.add_argument('--export_score_path', type=str, default='',
+                        help='Optional .npz path for exporting test-time point scores and labels.')
     parser.add_argument('--lambda_diff', type=float, default=0.0,
                         help='训练时差分重建项权重（0=不启用，MSL建议 0.1~1.0，需重训练）')
 
