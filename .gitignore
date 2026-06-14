@@ -128,11 +128,19 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# claude
+# ============================================
+# AI / Codex 生成的文件
+# ============================================
 .claude/
-REWRITE_PROMPT_final.md
+ANALYZE_RESULTS.md
+CLAIMS_FROM_RESULTS.md
+findings.md
+MANIFEST.md
+PAPER_PLAN.md
 
-# data & checkpoints
+# ============================================
+# 数据 / 检查点 / 日志
+# ============================================
 data/
 checkpoints/
 results/
@@ -140,11 +148,21 @@ diagnostics/
 logs/
 documents/
 
-# scripts
+# ============================================
+# 脚本 / 工具
+# ============================================
 scripts/
-
-# figures
-figures/
 tools/
 
+# ============================================
+# IDE / 编辑器
+# ============================================
 .vscode/
+.aris/
+
+# ============================================
+# 其他生成内容
+# ============================================
+audit_work/
+paper/
+figures/

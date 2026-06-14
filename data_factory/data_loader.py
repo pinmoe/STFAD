@@ -13,6 +13,19 @@ from sklearn.preprocessing import StandardScaler
 import pickle
 
 
+def _split_train_val(data, val_ratio=0.2):
+    if len(data) <= 1:
+        return data, data
+    n_val = max(1, int(len(data) * val_ratio))
+    if n_val >= len(data):
+        n_val = 1
+    return data[:-n_val], data[-n_val:]
+
+
+def _zero_window_label(win_size):
+    return np.zeros((win_size, 1), dtype=np.float32)
+
+
 class PSMSegLoader(object):
     def __init__(self, data_path, win_size, step, mode="train"):
         self.mode = mode
@@ -81,8 +94,7 @@ class MSLSegLoader(object):
         test_data = np.load(data_path + "/MSL_test.npy")
         self.test = self.scaler.transform(test_data)
 
-        self.train = data
-        self.val = self.test
+        self.train, self.val = _split_train_val(data)
         self.test_labels = np.load(data_path + "/MSL_test_label.npy")
         print("test:", self.test.shape)
         print("train:", self.train.shape)
@@ -101,9 +113,9 @@ class MSLSegLoader(object):
     def __getitem__(self, index):
         index = index * self.step
         if self.mode == "train":
-            return np.float32(self.train[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
+            return np.float32(self.train[index:index + self.win_size]), _zero_window_label(self.win_size)
         elif (self.mode == 'val'):
-            return np.float32(self.val[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
+            return np.float32(self.val[index:index + self.win_size]), _zero_window_label(self.win_size)
         elif (self.mode == 'test'):
             return np.float32(self.test[index:index + self.win_size]), np.float32(
                 self.test_labels[index:index + self.win_size])
@@ -125,8 +137,7 @@ class SMAPSegLoader(object):
         test_data = np.load(data_path + "/SMAP_test.npy")
         self.test = self.scaler.transform(test_data)
 
-        self.train = data
-        self.val = self.test
+        self.train, self.val = _split_train_val(data)
         self.test_labels = np.load(data_path + "/SMAP_test_label.npy")
         print("test:", self.test.shape)
         print("train:", self.train.shape)
@@ -145,9 +156,9 @@ class SMAPSegLoader(object):
     def __getitem__(self, index):
         index = index * self.step
         if self.mode == "train":
-            return np.float32(self.train[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
+            return np.float32(self.train[index:index + self.win_size]), _zero_window_label(self.win_size)
         elif (self.mode == 'val'):
-            return np.float32(self.val[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
+            return np.float32(self.val[index:index + self.win_size]), _zero_window_label(self.win_size)
         elif (self.mode == 'test'):
             return np.float32(self.test[index:index + self.win_size]), np.float32(
                 self.test_labels[index:index + self.win_size])
@@ -213,8 +224,7 @@ class SKABSegLoader(object):
         test_data = np.load(data_path + "/SKAB_test.npy")
         self.test = self.scaler.transform(test_data)
 
-        self.train = data
-        self.val = self.test
+        self.train, self.val = _split_train_val(data)
         self.test_labels = np.load(data_path + "/SKAB_test_label.npy")
 
         print("test:", self.test.shape)
@@ -234,10 +244,10 @@ class SKABSegLoader(object):
         index = index * self.step
         if self.mode == "train":
             return np.float32(self.train[index:index + self.win_size]), \
-                   np.float32(self.test_labels[0:self.win_size])
+                   _zero_window_label(self.win_size)
         elif self.mode == "val":
             return np.float32(self.val[index:index + self.win_size]), \
-                   np.float32(self.test_labels[0:self.win_size])
+                   _zero_window_label(self.win_size)
         elif self.mode == "test":
             return np.float32(self.test[index:index + self.win_size]), \
                    np.float32(self.test_labels[index:index + self.win_size])
@@ -402,9 +412,9 @@ class ST330IR001CP001SegLoader(object):
 
         n_features = train_data.shape[-1]
         self.scaler.fit(train_data.reshape(-1, n_features))
-        self.train = self.scaler.transform(train_data.reshape(-1, n_features)).reshape(train_data.shape)
+        train_scaled = self.scaler.transform(train_data.reshape(-1, n_features)).reshape(train_data.shape)
+        self.train, self.val = _split_train_val(train_scaled)
         self.test = self.scaler.transform(test_data.reshape(-1, n_features)).reshape(test_data.shape)
-        self.val = self.test
         self.test_labels = test_labels
 
         print("train:", self.train.shape)
@@ -414,12 +424,19 @@ class ST330IR001CP001SegLoader(object):
     def __len__(self):
         if self.mode == "train":
             return self.train.shape[0]
+        if self.mode == "val":
+            return self.val.shape[0]
         return self.test.shape[0]
 
     def __getitem__(self, index):
         if self.mode == "train":
             return (
                 np.float32(self.train[index]),
+                np.zeros((self.win_size, 1), dtype=np.float32),
+            )
+        if self.mode == "val":
+            return (
+                np.float32(self.val[index]),
                 np.zeros((self.win_size, 1), dtype=np.float32),
             )
         return (

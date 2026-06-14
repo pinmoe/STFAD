@@ -4,6 +4,9 @@ import torch.nn.functional as F
 import numpy as np
 import os
 import time
+import json
+import re
+import subprocess
 from utils.utils import *
 from model.AnomalyTransformer import AnomalyTransformer
 from data_factory.data_loader import get_loader_segment
@@ -31,6 +34,36 @@ def adjust_learning_rate(optimizer, epoch, lr_):
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
         print('Updating learning rate to {}'.format(lr))
+
+
+def _safe_name(value):
+    value = str(value).strip()
+    if not value:
+        return "unnamed"
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
+
+
+def _jsonable(value):
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    return str(value)
+
+
+def _git_commit():
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        return None
 
 
 class EarlyStopping:
@@ -95,6 +128,61 @@ class Solver(object):
         self.build_model()
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.criterion = nn.MSELoss()
+        self._config_snapshot = dict(config)
+
+    def _experiment_name(self):
+        explicit = getattr(self, "experiment_name", "")
+        if explicit:
+            return _safe_name(explicit)
+        parts = [
+            getattr(self, "dataset", "dataset"),
+            getattr(self, "dgr_mode", "none"),
+            getattr(self, "prior_fusion", "replace"),
+            getattr(self, "dgr_feature_mode", "diff"),
+            getattr(self, "score_mode", "combined"),
+        ]
+        if float(getattr(self, "diff_beta", 0.0)) > 0:
+            parts.append("diffbeta_{}".format(getattr(self, "diff_beta")))
+        if int(getattr(self, "score_smooth_k", 1)) > 1:
+            parts.append("smooth_{}".format(getattr(self, "score_smooth_k")))
+        if int(getattr(self, "score_local_z_win", 0)) > 1:
+            parts.append("localz_{}".format(getattr(self, "score_local_z_win")))
+        if bool(getattr(self, "use_memory_bank", False)):
+            parts.append("memorybank")
+        return _safe_name("__".join(str(p) for p in parts))
+
+    def _result_path(self):
+        return os.path.join(
+            getattr(self, "result_dir", "results/paper_main"),
+            _safe_name(getattr(self, "dataset", "dataset")),
+            self._experiment_name(),
+            "seed_{}".format(_safe_name(getattr(self, "seed", "unknown"))),
+        )
+
+    def _write_test_outputs(self, metrics, arrays):
+        out_dir = self._result_path()
+        os.makedirs(out_dir, exist_ok=True)
+
+        config = {k: _jsonable(v) for k, v in self._config_snapshot.items()}
+        config["resolved_experiment_name"] = self._experiment_name()
+        config["git_commit"] = _git_commit()
+        config["checkpoint_path"] = os.path.join(
+            str(self.model_save_path),
+            str(self.dataset) + "_checkpoint.pth",
+        )
+
+        with open(os.path.join(out_dir, "config.json"), "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False, sort_keys=True)
+        with open(os.path.join(out_dir, "metrics.json"), "w", encoding="utf-8") as f:
+            json.dump(_jsonable(metrics), f, indent=2, ensure_ascii=False, sort_keys=True)
+        with open(os.path.join(out_dir, "checkpoint_path.txt"), "w", encoding="utf-8") as f:
+            f.write(config["checkpoint_path"] + "\n")
+
+        if bool(getattr(self, "save_scores", True)):
+            for name, arr in arrays.items():
+                np.save(os.path.join(out_dir, name + ".npy"), np.asarray(arr))
+
+        print("[Results] saved structured outputs to {}".format(out_dir))
 
     def build_model(self):
         self.model = AnomalyTransformer(
@@ -298,11 +386,12 @@ class Solver(object):
             adjust_learning_rate(self.optimizer, epoch + 1, self.lr)
 
     def test(self):
+        test_start_time = time.time()
+        checkpoint_path = os.path.join(str(self.model_save_path), str(self.dataset) + '_checkpoint.pth')
         self.model.load_state_dict(
-            torch.load(
-                os.path.join(str(self.model_save_path), str(self.dataset) + '_checkpoint.pth')))
+            torch.load(checkpoint_path, map_location=self.device))
         self.model.eval()
-        temperature = 50
+        temperature = float(getattr(self, 'temperature', 50.0))
 
         print("======================TEST MODE======================")
 
@@ -323,9 +412,15 @@ class Solver(object):
         _smooth      = int(getattr(self,   'score_smooth_k',   1))
         _diff_beta   = float(getattr(self, 'diff_beta',        0.0))
         _local_z_win = int(getattr(self,   'score_local_z_win', 0))
+        _threshold_mode = getattr(self, 'threshold_mode', 'val_percentile')
+        _threshold_percentile = float(getattr(self, 'threshold_percentile', 95.0))
+        _threshold_grid_min = float(getattr(self, 'threshold_grid_min', 75.0))
+        _threshold_grid_max = float(getattr(self, 'threshold_grid_max', 99.9))
+        _threshold_grid_step = float(getattr(self, 'threshold_grid_step', 0.5))
         if _smode != 'combined' or _smooth > 1 or _diff_beta > 0 or _local_z_win > 1:
             print(f"[评分策略] mode={_smode},  alpha={_salpha},  smooth_k={_smooth},  "
                   f"diff_beta={_diff_beta},  local_z_win={_local_z_win}")
+        print(f"[阈值协议] mode={_threshold_mode}, percentile={_threshold_percentile}")
 
         # chan_var 模式：在训练集上估计每个通道重建误差的方差，
         # 以方差倒数作为通道权重 w_c ∝ 1/(Var_c + ε)，归一化后加权求和。
@@ -420,65 +515,126 @@ class Solver(object):
             train_energy = _local_zscore(train_energy, _local_z_win)
 
         # (2) find the threshold
+        if _threshold_mode in ('val_percentile', 'val_grid'):
+            threshold_loader = self.vali_loader
+            threshold_source = 'val'
+        elif _threshold_mode == 'oracle_ratio':
+            threshold_loader = self.thre_loader
+            threshold_source = 'test'
+        else:
+            threshold_loader = None
+            threshold_source = 'train'
+
         attens_energy = []
-        for i, batch in enumerate(self.thre_loader):
-            input_data = batch[0]
-            input = input_data.float().to(self.device)
-            output, series, prior, _ = self.model(input)
-            if _mb_prior is not None:
-                prior = [p.expand(input.shape[0], -1, -1, -1) for p in _mb_prior]
+        threshold_labels = []
+        if threshold_loader is not None:
+            for i, batch in enumerate(threshold_loader):
+                input_data = batch[0]
+                labels = batch[1]
+                input = input_data.float().to(self.device)
+                output, series, prior, _ = self.model(input)
+                if _mb_prior is not None:
+                    prior = [p.expand(input.shape[0], -1, -1, -1) for p in _mb_prior]
 
-            _rec = criterion(input, output)
-            if _smode == 'chan_var':
-                loss = (_rec * chan_w.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
-            elif _smode == 'rec_mean':
-                loss = _rec.mean(dim=-1)
-            else:
-                loss = torch.max(_rec, dim=-1).values
-
-            series_loss = 0.0
-            prior_loss = 0.0
-            for u in range(len(prior)):
-                if u == 0:
-                    series_loss = my_kl_loss(series[u], (
-                            prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
-                                                                                                   self.win_size)).detach()) * temperature
-                    prior_loss = my_kl_loss(
-                        (prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
-                                                                                                self.win_size)),
-                        series[u].detach()) * temperature
+                _rec = criterion(input, output)
+                if _smode == 'chan_var':
+                    loss = (_rec * chan_w.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
+                elif _smode == 'rec_mean':
+                    loss = _rec.mean(dim=-1)
                 else:
-                    series_loss += my_kl_loss(series[u], (
-                            prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
-                                                                                                   self.win_size)).detach()) * temperature
-                    prior_loss += my_kl_loss(
-                        (prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
-                                                                                                self.win_size)),
-                        series[u].detach()) * temperature
-            # Metric
-            kl_score = series_loss + prior_loss
-            if _smode in ('rec_only', 'rec_mean', 'chan_var'):
-                score = loss
-            elif _smode == 'weighted':
-                score = _salpha * loss + (1.0 - _salpha) * kl_score
-            else:
-                score = kl_score + loss
-            if _diff_beta > 0:
-                _dr = criterion(input[:, 1:, :] - input[:, :-1, :],
-                                output[:, 1:, :] - output[:, :-1, :])
-                _dr = torch.cat([torch.zeros(_dr.shape[0], 1, _dr.shape[2], device=input.device), _dr], dim=1)
-                score = score + _diff_beta * torch.max(_dr, dim=-1).values
-            cri = score.detach().cpu().numpy()
-            attens_energy.append(cri)
+                    loss = torch.max(_rec, dim=-1).values
 
-        attens_energy = np.concatenate(attens_energy, axis=0).reshape(-1)
-        test_energy = np.array(attens_energy)
-        if _smooth > 1:
-            test_energy = np.convolve(test_energy, np.ones(_smooth) / _smooth, mode='same')
-        if _local_z_win > 1:
-            test_energy = _local_zscore(test_energy, _local_z_win)
-        combined_energy = np.concatenate([train_energy, test_energy], axis=0)
-        thresh = np.percentile(combined_energy, 100 - self.anormly_ratio)
+                series_loss = 0.0
+                prior_loss = 0.0
+                for u in range(len(prior)):
+                    if u == 0:
+                        series_loss = my_kl_loss(series[u], (
+                                prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
+                                                                                                       self.win_size)).detach()) * temperature
+                        prior_loss = my_kl_loss(
+                            (prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
+                                                                                                    self.win_size)),
+                            series[u].detach()) * temperature
+                    else:
+                        series_loss += my_kl_loss(series[u], (
+                                prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
+                                                                                                       self.win_size)).detach()) * temperature
+                        prior_loss += my_kl_loss(
+                            (prior[u] / torch.unsqueeze(torch.sum(prior[u], dim=-1), dim=-1).repeat(1, 1, 1,
+                                                                                                    self.win_size)),
+                            series[u].detach()) * temperature
+                kl_score = series_loss + prior_loss
+                if _smode in ('rec_only', 'rec_mean', 'chan_var'):
+                    score = loss
+                elif _smode == 'weighted':
+                    score = _salpha * loss + (1.0 - _salpha) * kl_score
+                else:
+                    score = kl_score + loss
+                if _diff_beta > 0:
+                    _dr = criterion(input[:, 1:, :] - input[:, :-1, :],
+                                    output[:, 1:, :] - output[:, :-1, :])
+                    _dr = torch.cat([torch.zeros(_dr.shape[0], 1, _dr.shape[2], device=input.device), _dr], dim=1)
+                    score = score + _diff_beta * torch.max(_dr, dim=-1).values
+                cri = score.detach().cpu().numpy()
+                attens_energy.append(cri)
+                threshold_labels.append(labels)
+
+            attens_energy = np.concatenate(attens_energy, axis=0).reshape(-1)
+            threshold_energy = np.array(attens_energy)
+            if _smooth > 1:
+                threshold_energy = np.convolve(threshold_energy, np.ones(_smooth) / _smooth, mode='same')
+            if _local_z_win > 1:
+                threshold_energy = _local_zscore(threshold_energy, _local_z_win)
+            threshold_labels = np.concatenate(threshold_labels, axis=0).reshape(-1).astype(int)
+        else:
+            threshold_energy = train_energy
+            threshold_labels = np.zeros_like(threshold_energy, dtype=int)
+
+        threshold_details = {
+            'mode': _threshold_mode,
+            'source': threshold_source,
+            'uses_test_scores': bool(_threshold_mode == 'oracle_ratio'),
+            'uses_test_labels': False,
+        }
+        if _threshold_mode == 'train_percentile':
+            thresh = np.percentile(train_energy, _threshold_percentile)
+            threshold_details['percentile'] = _threshold_percentile
+        elif _threshold_mode == 'val_percentile':
+            thresh = np.percentile(threshold_energy, _threshold_percentile)
+            threshold_details['percentile'] = _threshold_percentile
+        elif _threshold_mode == 'val_grid':
+            from sklearn.metrics import f1_score
+            if threshold_labels.sum() == 0:
+                thresh = np.percentile(threshold_energy, _threshold_percentile)
+                threshold_details['fallback'] = 'val_labels_have_no_positive_points'
+                threshold_details['percentile'] = _threshold_percentile
+            else:
+                best_f1 = -1.0
+                best_percentile = _threshold_grid_min
+                best_thresh = np.percentile(threshold_energy, best_percentile)
+                percentiles = np.arange(
+                    _threshold_grid_min,
+                    _threshold_grid_max + 1e-9,
+                    _threshold_grid_step,
+                )
+                for percentile in percentiles:
+                    candidate = np.percentile(threshold_energy, percentile)
+                    candidate_pred = (threshold_energy > candidate).astype(int)
+                    candidate_f1 = f1_score(threshold_labels, candidate_pred, zero_division=0)
+                    if candidate_f1 > best_f1:
+                        best_f1 = candidate_f1
+                        best_percentile = float(percentile)
+                        best_thresh = candidate
+                thresh = best_thresh
+                threshold_details['best_val_f1'] = float(best_f1)
+                threshold_details['percentile'] = float(best_percentile)
+                threshold_details['uses_test_labels'] = bool(threshold_source == 'test')
+        else:
+            combined_energy = np.concatenate([train_energy, threshold_energy], axis=0)
+            legacy_percentile = 100 - self.anormly_ratio
+            thresh = np.percentile(combined_energy, legacy_percentile)
+            threshold_details['percentile'] = float(legacy_percentile)
+            threshold_details['anormly_ratio'] = float(self.anormly_ratio)
         print("Threshold :", thresh)
 
         # (3) evaluation on the test set
@@ -583,8 +739,8 @@ class Solver(object):
         from sklearn.metrics import precision_recall_fscore_support
         from sklearn.metrics import accuracy_score
         accuracy = accuracy_score(gt, pred)
-        precision, recall, f_score, support = precision_recall_fscore_support(gt, pred,
-                                                                              average='binary')
+        precision, recall, f_score, support = precision_recall_fscore_support(
+            gt, pred, average='binary', zero_division=0)
         print(
             "Accuracy : {:0.4f}, Precision : {:0.4f}, Recall : {:0.4f}, F-score : {:0.4f} ".format(
                 accuracy, precision,
@@ -595,6 +751,7 @@ class Solver(object):
         pw = pointwise_metrics(gt, pred_raw)
         print("[逐点(无PA)] Precision: {:.4f}, Recall: {:.4f}, F1: {:.4f}".format(
             pw['precision'], pw['recall'], pw['f1']))
+        auprc = None
         try:
             auprc = compute_auprc(gt, test_energy)
             print("[AUPRC]      {:.4f}  (不依赖阈值，越高越好)".format(auprc))
@@ -607,6 +764,10 @@ class Solver(object):
         # ---- 窗口级评估（固定窗口数据集专用，如 ST330IR001_CP001）----
         # 每条样本本身就是一个完整窗口，点级 AUPRC 噪声很大（窗口内各步骤得分不同）。
         # 窗口级评估：对窗口内所有步骤的异常分数取均值 → 1 个窗口分 → 与窗口标签比较。
+        window_metrics = {}
+        win_scores = None
+        win_labels = None
+        win_pred = None
         if self.win_size > 1 and len(test_energy) % self.win_size == 0:
             n_win = len(test_energy) // self.win_size
             win_scores = test_energy.reshape(n_win, self.win_size).mean(axis=1)
@@ -623,7 +784,75 @@ class Solver(object):
                     win_pw = pointwise_metrics(win_labels, win_pred)
                     print("[窗口级F1]   Precision: {:.4f}, Recall: {:.4f}, F1: {:.4f}".format(
                         win_pw['precision'], win_pw['recall'], win_pw['f1']))
+                    window_metrics = {
+                        'n_windows': int(n_win),
+                        'anomaly_windows': int(n_anom_win),
+                        'threshold': float(win_thresh),
+                        'auprc': float(win_auprc),
+                        'precision': float(win_pw['precision']),
+                        'recall': float(win_pw['recall']),
+                        'f1': float(win_pw['f1']),
+                    }
                 except Exception:
                     pass
+
+        metrics = {
+            'dataset': getattr(self, 'dataset', None),
+            'experiment_name': self._experiment_name(),
+            'seed': getattr(self, 'seed', None),
+            'checkpoint_path': checkpoint_path,
+            'threshold': float(thresh),
+            'threshold_protocol': _threshold_mode,
+            'threshold_details': threshold_details,
+            'threshold_percentile': threshold_details.get('percentile'),
+            'temperature': float(temperature),
+            'score_mode': _smode,
+            'score_alpha': _salpha,
+            'score_smooth_k': _smooth,
+            'diff_beta': _diff_beta,
+            'score_local_z_win': _local_z_win,
+            'use_memory_bank': bool(_use_mb),
+            'n_points': int(len(gt)),
+            'n_anomaly_points': int(gt.sum()),
+            'anomaly_ratio': float(gt.mean()) if len(gt) else 0.0,
+            'pa': {
+                'accuracy': float(accuracy),
+                'precision': float(precision),
+                'recall': float(recall),
+                'f1': float(f_score),
+            },
+            'pointwise': {
+                'accuracy': float(pw['accuracy']),
+                'precision': float(pw['precision']),
+                'recall': float(pw['recall']),
+                'f1': float(pw['f1']),
+            },
+            'ranking': {
+                'auprc': None if auprc is None else float(auprc),
+            },
+            'event_level': {
+                'precision': float(ev['event_precision']),
+                'recall': float(ev['event_recall']),
+                'f1': float(ev['event_f1']),
+            },
+            'window_level': window_metrics,
+            'runtime_sec': float(time.time() - test_start_time),
+        }
+        arrays = {
+            'scores': test_energy,
+            'labels': gt,
+            'pred_point': pred_raw,
+            'pred_pa': pred,
+            'train_scores': train_energy,
+            'threshold_scores': threshold_energy,
+            'threshold_labels': threshold_labels,
+        }
+        if win_scores is not None:
+            arrays['window_scores'] = win_scores
+        if win_labels is not None:
+            arrays['window_labels'] = win_labels
+        if win_pred is not None:
+            arrays['window_pred'] = win_pred
+        self._write_test_outputs(metrics, arrays)
 
         return accuracy, precision, recall, f_score

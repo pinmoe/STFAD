@@ -43,6 +43,23 @@ if __name__ == '__main__':
     parser.add_argument('--model_save_path', type=str, default='checkpoints')
     parser.add_argument('--anormly_ratio', type=float, default=4.00)
     parser.add_argument('--seed', type=int, default=2024)
+    parser.add_argument('--result_dir', type=str, default='results/paper_main',
+                        help='Directory for structured test outputs.')
+    parser.add_argument('--experiment_name', type=str, default='',
+                        help='Stable name for this experiment/config. Auto-generated when empty.')
+    parser.add_argument('--save_scores', type=str2bool, default='true',
+                        help='Whether to save scores, labels, and predictions during test.')
+    parser.add_argument('--threshold_mode', type=str, default='val_percentile',
+                        choices=['train_percentile', 'val_percentile', 'val_grid', 'oracle_ratio'],
+                        help='Threshold protocol. oracle_ratio preserves the legacy train+test percentile behavior.')
+    parser.add_argument('--threshold_percentile', type=float, default=95.0,
+                        help='Score percentile for train_percentile/val_percentile fallback thresholding.')
+    parser.add_argument('--threshold_grid_min', type=float, default=75.0,
+                        help='Minimum percentile for val_grid threshold search.')
+    parser.add_argument('--threshold_grid_max', type=float, default=99.9,
+                        help='Maximum percentile for val_grid threshold search.')
+    parser.add_argument('--threshold_grid_step', type=float, default=0.5,
+                        help='Percentile step for val_grid threshold search.')
 
     # use_dgr_prior 保留向后兼容，但优先使用 dgr_mode
     parser.add_argument('--use_dgr_prior', type=str2bool, default='false')
