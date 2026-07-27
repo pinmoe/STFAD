@@ -10,6 +10,12 @@ import subprocess
 from utils.utils import *
 from model.AnomalyTransformer import AnomalyTransformer
 from data_factory.data_loader import get_loader_segment
+from utils.eval_metrics import (
+    aggregate_window_scores,
+    resolve_eval_unit,
+    window_labels_from_point_labels,
+    window_level_metrics_from_scores,
+)
 
 
 def _local_zscore(arr, half_win):
@@ -184,12 +190,29 @@ class Solver(object):
 
         print("[Results] saved structured outputs to {}".format(out_dir))
 
+    def _model_complexity(self):
+        total = sum(p.numel() for p in self.model.parameters())
+        trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        return {
+            "total_parameters": int(total),
+            "trainable_parameters": int(trainable),
+        }
+
+    def _write_train_outputs(self, metrics):
+        out_dir = self._result_path()
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, "train_metrics.json"), "w", encoding="utf-8") as f:
+            json.dump(_jsonable(metrics), f, indent=2, ensure_ascii=False, sort_keys=True)
+
     def build_model(self):
         self.model = AnomalyTransformer(
             win_size=self.win_size,
             enc_in=self.input_c,
             c_out=self.output_c,
-            e_layers=3,
+            d_model=getattr(self, 'd_model', 512),
+            dropout=getattr(self, 'dropout', 0.0),
+            n_heads=getattr(self, 'n_heads', 8),
+            e_layers=getattr(self, 'e_layers', 3),
             use_dgr_prior=self.use_dgr_prior,
             dgr_mode=getattr(self, 'dgr_mode', 'none'),   # 向后兼容
             prior_fusion=getattr(self, 'prior_fusion', 'replace'),
@@ -297,6 +320,7 @@ class Solver(object):
     def train(self):
 
         print("======================TRAIN MODE======================")
+        train_start_time = time.time()
 
         _lambda_diff = float(getattr(self, 'lambda_diff', 0.0))
         if _lambda_diff > 0:
@@ -308,6 +332,9 @@ class Solver(object):
             os.makedirs(path)
         early_stopping = EarlyStopping(patience=3, verbose=True, dataset_name=self.dataset)
         train_steps = len(self.train_loader)
+        completed_epochs = 0
+        best_val_loss1 = None
+        best_val_loss2 = None
 
         for epoch in range(self.num_epochs):
             iter_count = 0
@@ -375,6 +402,11 @@ class Solver(object):
             train_loss = np.average(loss1_list)
 
             vali_loss1, vali_loss2 = self.vali(self.vali_loader)
+            completed_epochs = epoch + 1
+            if best_val_loss1 is None or vali_loss1 < best_val_loss1:
+                best_val_loss1 = float(vali_loss1)
+            if best_val_loss2 is None or vali_loss2 < best_val_loss2:
+                best_val_loss2 = float(vali_loss2)
 
             print(
                 "Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} ".format(
@@ -385,6 +417,22 @@ class Solver(object):
                 break
             adjust_learning_rate(self.optimizer, epoch + 1, self.lr)
 
+        train_metrics = {
+            "dataset": getattr(self, "dataset", None),
+            "experiment_name": self._experiment_name(),
+            "seed": getattr(self, "seed", None),
+            "completed_epochs": int(completed_epochs),
+            "requested_epochs": int(getattr(self, "num_epochs", 0)),
+            "train_steps_per_epoch": int(train_steps),
+            "best_val_loss1": best_val_loss1,
+            "best_val_loss2": best_val_loss2,
+            "runtime_sec": float(time.time() - train_start_time),
+            "model": self._model_complexity(),
+            "checkpoint_path": os.path.join(str(self.model_save_path), str(self.dataset) + "_checkpoint.pth"),
+        }
+        self._write_train_outputs(train_metrics)
+
+    @torch.no_grad()
     def test(self):
         test_start_time = time.time()
         checkpoint_path = os.path.join(str(self.model_save_path), str(self.dataset) + '_checkpoint.pth')
@@ -595,6 +643,7 @@ class Solver(object):
             'source': threshold_source,
             'uses_test_scores': bool(_threshold_mode == 'oracle_ratio'),
             'uses_test_labels': False,
+            'uses_test_anomaly_ratio': bool(_threshold_mode == 'oracle_ratio'),
         }
         if _threshold_mode == 'train_percentile':
             thresh = np.percentile(train_energy, _threshold_percentile)
@@ -768,7 +817,7 @@ class Solver(object):
         win_scores = None
         win_labels = None
         win_pred = None
-        if self.win_size > 1 and len(test_energy) % self.win_size == 0:
+        if False and self.win_size > 1 and len(test_energy) % self.win_size == 0:
             n_win = len(test_energy) // self.win_size
             win_scores = test_energy.reshape(n_win, self.win_size).mean(axis=1)
             win_labels = test_labels.reshape(n_win, self.win_size).max(axis=1).astype(int)
@@ -796,6 +845,35 @@ class Solver(object):
                 except Exception:
                     pass
 
+        resolved_eval_unit = resolve_eval_unit(getattr(self, 'dataset', ''), getattr(self, 'eval_unit', 'auto'))
+        if resolved_eval_unit == 'window':
+            if getattr(self, 'window_threshold_mode', 'val_percentile') != 'val_percentile':
+                raise ValueError("window evaluation currently supports only window_threshold_mode=val_percentile")
+            try:
+                wm = window_level_metrics_from_scores(
+                    test_scores=test_energy,
+                    test_labels=test_labels,
+                    val_scores=threshold_energy,
+                    win_size=int(self.win_size),
+                    percentile=float(getattr(self, 'threshold_percentile', 95.0)),
+                    agg=getattr(self, 'window_score_agg', 'mean'),
+                    topk=int(getattr(self, 'window_score_topk', 5)),
+                )
+                win_scores = wm.pop('_scores')
+                win_labels = wm.pop('_labels')
+                win_pred = wm.pop('_pred')
+                window_metrics = wm
+                print("[Window AUPRC] {:.4f}  (n_windows={}, anomaly_windows={})".format(
+                    window_metrics['auprc'], window_metrics['n_windows'], window_metrics['anomaly_windows']))
+                print("[Window F1]   Precision: {:.4f}, Recall: {:.4f}, F1: {:.4f}".format(
+                    window_metrics['precision'], window_metrics['recall'], window_metrics['f1']))
+            except Exception as exc:
+                raise RuntimeError(
+                    "Window-level evaluation failed for dataset={} eval_unit={} win_size={}.".format(
+                        getattr(self, 'dataset', None), resolved_eval_unit, self.win_size
+                    )
+                ) from exc
+
         metrics = {
             'dataset': getattr(self, 'dataset', None),
             'experiment_name': self._experiment_name(),
@@ -811,6 +889,9 @@ class Solver(object):
             'score_smooth_k': _smooth,
             'diff_beta': _diff_beta,
             'score_local_z_win': _local_z_win,
+            'eval_unit': resolved_eval_unit,
+            'window_score_agg': getattr(self, 'window_score_agg', 'mean'),
+            'window_threshold_mode': getattr(self, 'window_threshold_mode', 'val_percentile'),
             'use_memory_bank': bool(_use_mb),
             'n_points': int(len(gt)),
             'n_anomaly_points': int(gt.sum()),
@@ -837,6 +918,7 @@ class Solver(object):
             },
             'window_level': window_metrics,
             'runtime_sec': float(time.time() - test_start_time),
+            'model': self._model_complexity(),
         }
         arrays = {
             'scores': test_energy,

@@ -151,8 +151,13 @@ documents/
 # ============================================
 # 脚本 / 工具
 # ============================================
-scripts/
-tools/
+!scripts/
+scripts/*
+!scripts/prepare_st330ir001_cp001.py
+!scripts/run_paper_supplement.sh
+!tools/
+tools/*
+!tools/summarize_paper_results.py
 
 # ============================================
 # IDE / 编辑器
@@ -166,3 +171,13 @@ tools/
 audit_work/
 paper/
 figures/
+
+# ============================================
+# Skills生成内容
+# ============================================
+.agents/
+paper_revision_refs/
+render_check_revised_word/
+tables/
+AGENTS.md
+.pytest_tmp/

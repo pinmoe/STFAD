@@ -5,26 +5,36 @@ from pathlib import Path
 
 
 DATASETS = {
+    "HAI": {
+        "data_path": "data/HAI",
+        "input_c": 59,
+        "output_c": 59,
+        "batch_size": 128,
+    },
     "MSL": {
         "data_path": "data/MSL",
         "input_c": 55,
         "output_c": 55,
+        "batch_size": 128,
     },
     "SMAP": {
         "data_path": "data/SMAP",
         "input_c": 25,
         "output_c": 25,
+        "batch_size": 128,
     },
     "SKAB": {
         "data_path": "data/SKAB",
         "input_c": 8,
         "output_c": 8,
+        "batch_size": 128,
     },
     "ST330IR001_CP001": {
         "data_path": "data/ST330IR001.CP001",
         "input_c": 29,
         "output_c": 29,
         "win_size": 56,
+        "batch_size": 128,
     },
 }
 
@@ -38,6 +48,22 @@ CONFIGS = {
         "--dgr_mode", "dynamic",
         "--dgr_feature_mode", "diff",
         "--prior_fusion", "replace",
+        "--score_mode", "combined",
+    ],
+    "E3_multiscale": [
+        "--dgr_mode", "multiscale",
+        "--dgr_feature_mode", "diff",
+        "--prior_fusion", "replace",
+        "--score_mode", "combined",
+    ],
+    "E4_static": [
+        "--dgr_mode", "static",
+        "--dgr_feature_mode", "diff",
+        "--prior_fusion", "replace",
+        "--score_mode", "combined",
+    ],
+    "E5_sigma_offset": [
+        "--dgr_mode", "sigma_offset",
         "--score_mode", "combined",
     ],
     "DGR_raw": [
@@ -67,6 +93,12 @@ CONFIGS = {
         "--prior_alpha_learnable", "true",
         "--score_mode", "combined",
     ],
+    "B3_entropy_gate": [
+        "--dgr_mode", "dynamic",
+        "--dgr_feature_mode", "diff",
+        "--prior_fusion", "entropy_gate",
+        "--score_mode", "combined",
+    ],
 }
 
 
@@ -88,6 +120,8 @@ def main():
     parser.add_argument("--threshold_mode", default="val_percentile",
                         choices=["train_percentile", "val_percentile", "val_grid", "oracle_ratio"])
     parser.add_argument("--threshold_percentile", type=float, default=95.0)
+    parser.add_argument("--batch_size", type=int, default=None,
+                        help="Override dataset batch size. When omitted, dataset defaults are used.")
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--dry_run", action="store_true")
@@ -116,6 +150,9 @@ def main():
                     "--threshold_mode", args.threshold_mode,
                     "--threshold_percentile", str(args.threshold_percentile),
                 ]
+                batch_size = args.batch_size if args.batch_size is not None else dataset_args.get("batch_size")
+                if batch_size is not None:
+                    common += ["--batch_size", str(batch_size)]
                 if "win_size" in dataset_args:
                     common += ["--win_size", str(dataset_args["win_size"])]
                 common += config_args

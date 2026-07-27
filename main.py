@@ -1,5 +1,6 @@
 import os
 import argparse
+import sys
 
 from torch.backends import cudnn
 from utils.utils import *
@@ -60,6 +61,14 @@ if __name__ == '__main__':
                         help='Maximum percentile for val_grid threshold search.')
     parser.add_argument('--threshold_grid_step', type=float, default=0.5,
                         help='Percentile step for val_grid threshold search.')
+    parser.add_argument('--eval_unit', type=str, default='auto',
+                        choices=['auto', 'point', 'window'],
+                        help='auto uses window evaluation for ST330IR001_CP001 and point evaluation otherwise.')
+    parser.add_argument('--window_score_agg', type=str, default='mean',
+                        choices=['mean', 'max', 'topk_mean'])
+    parser.add_argument('--window_score_topk', type=int, default=5)
+    parser.add_argument('--window_threshold_mode', type=str, default='val_percentile',
+                        choices=['val_percentile'])
 
     # use_dgr_prior 保留向后兼容，但优先使用 dgr_mode
     parser.add_argument('--use_dgr_prior', type=str2bool, default='false')
@@ -135,8 +144,14 @@ if __name__ == '__main__':
                         help='异常分数放大温度 (默认50, MSL/SKAB可尝试20-30)')
     parser.add_argument('--d_model', type=int, default=512,
                         help='Transformer d_model (HAI=512, MSL=256, SKAB=128)')
+    parser.add_argument('--n_heads', type=int, default=8)
+    parser.add_argument('--e_layers', type=int, default=3)
 
     config = parser.parse_args()
+    explicit_args = set()
+    for token in sys.argv[1:]:
+        if token.startswith('--'):
+            explicit_args.add(token[2:].split('=', 1)[0].replace('-', '_'))
 
     # 数据集感知的默认参数覆盖（仅当用户没有显式指定时生效）
     # 通过检查参数是否仍为原始默认值来做，简单有效
@@ -155,8 +170,7 @@ if __name__ == '__main__':
     if config.dataset in _DATASET_OVERRIDES:
         for k, v in _DATASET_OVERRIDES[config.dataset].items():
             # 只覆盖仍为原始默认值的参数
-            orig_default = parser.get_default(k)
-            if getattr(config, k) == orig_default:
+            if k not in explicit_args:
                 setattr(config, k, v)
                 print(f'[Auto] {k} overridden to {v} for dataset={config.dataset}')
 

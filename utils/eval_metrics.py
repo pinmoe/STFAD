@@ -105,6 +105,85 @@ def compute_auprc(gt: np.ndarray, score: np.ndarray) -> float:
     return auc(recall, precision)
 
 
+def resolve_eval_unit(dataset: str, eval_unit: str = "auto") -> str:
+    if eval_unit not in ("auto", "point", "window"):
+        raise ValueError(f"Unsupported eval_unit={eval_unit!r}")
+    if eval_unit != "auto":
+        return eval_unit
+    return "window" if dataset in ("ST330IR001_CP001", "ST330IR001.CP001") else "point"
+
+
+def aggregate_window_scores(scores: np.ndarray, win_size: int, agg: str = "mean", topk: int = 5) -> np.ndarray:
+    scores = np.asarray(scores, dtype=float)
+    if scores.ndim == 1:
+        if win_size <= 0 or len(scores) % win_size != 0:
+            raise ValueError("Flat scores must be divisible by win_size for window aggregation.")
+        scores = scores.reshape(len(scores) // win_size, win_size)
+    elif scores.ndim != 2:
+        raise ValueError("Window scores must be a flat (N*W,) or windowed (N,W) array.")
+
+    if agg == "mean":
+        return scores.mean(axis=1)
+    if agg == "max":
+        return scores.max(axis=1)
+    if agg == "topk_mean":
+        k = min(max(int(topk), 1), scores.shape[1])
+        return np.sort(scores, axis=1)[:, -k:].mean(axis=1)
+    raise ValueError(f"Unsupported window_score_agg={agg!r}")
+
+
+def window_labels_from_point_labels(labels: np.ndarray, win_size: int) -> np.ndarray:
+    labels = np.asarray(labels).astype(int)
+    if labels.ndim == 1:
+        if win_size <= 0 or len(labels) % win_size != 0:
+            raise ValueError("Flat labels must be divisible by win_size for window aggregation.")
+        labels = labels.reshape(len(labels) // win_size, win_size)
+    elif labels.ndim == 3 and labels.shape[-1] == 1:
+        labels = labels[:, :, 0]
+    elif labels.ndim != 2:
+        raise ValueError("Window labels must be flat, (N,W), or (N,W,1).")
+    return labels.max(axis=1).astype(int)
+
+
+def window_level_metrics_from_scores(
+    test_scores: np.ndarray,
+    test_labels: np.ndarray,
+    val_scores: np.ndarray,
+    win_size: int,
+    percentile: float = 95.0,
+    agg: str = "mean",
+    topk: int = 5,
+) -> dict:
+    val_window_scores = aggregate_window_scores(val_scores, win_size, agg=agg, topk=topk)
+    test_window_scores = aggregate_window_scores(test_scores, win_size, agg=agg, topk=topk)
+    test_window_labels = window_labels_from_point_labels(test_labels, win_size)
+    threshold = float(np.percentile(val_window_scores, percentile))
+    pred = (test_window_scores > threshold).astype(int)
+    pw = pointwise_metrics(test_window_labels, pred)
+    return {
+        "n_windows": int(len(test_window_labels)),
+        "anomaly_windows": int(test_window_labels.sum()),
+        "validation_windows": int(len(val_window_scores)),
+        "threshold": threshold,
+        "threshold_percentile": float(percentile),
+        "threshold_details": {
+            "source": "normal_validation_windows",
+            "uses_test_scores": False,
+            "uses_test_labels": False,
+            "uses_test_anomaly_ratio": False,
+        },
+        "window_score_agg": agg,
+        "window_score_topk": int(topk) if agg == "topk_mean" else None,
+        "auprc": float(compute_auprc(test_window_labels, test_window_scores)),
+        "precision": float(pw["precision"]),
+        "recall": float(pw["recall"]),
+        "f1": float(pw["f1"]),
+        "_scores": test_window_scores,
+        "_labels": test_window_labels,
+        "_pred": pred,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # 事件级指标
 # --------------------------------------------------------------------------- #

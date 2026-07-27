@@ -46,8 +46,7 @@ class PSMSegLoader(object):
 
         self.test = self.scaler.transform(test_data)
 
-        self.train = data
-        self.val = self.test
+        self.train, self.val = _split_train_val(data)
 
         self.test_labels = pd.read_csv(data_path + '/test_label.csv').values[:, 1:]
 
@@ -70,9 +69,9 @@ class PSMSegLoader(object):
     def __getitem__(self, index):
         index = index * self.step
         if self.mode == "train":
-            return np.float32(self.train[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
+            return np.float32(self.train[index:index + self.win_size]), _zero_window_label(self.win_size)
         elif (self.mode == 'val'):
-            return np.float32(self.val[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
+            return np.float32(self.val[index:index + self.win_size]), _zero_window_label(self.win_size)
         elif (self.mode == 'test'):
             return np.float32(self.test[index:index + self.win_size]), np.float32(
                 self.test_labels[index:index + self.win_size])
@@ -180,8 +179,7 @@ class HAISegLoader(object):
         test_data = np.load(data_path + "/HAI_test.npy")
         self.test = self.scaler.transform(test_data)
 
-        self.train = data
-        self.val = self.test
+        self.train, self.val = _split_train_val(data)
         self.test_labels = np.load(data_path + "/HAI_test_label.npy")
         print("test:", self.test.shape)
         print("train:", self.train.shape)
@@ -199,9 +197,9 @@ class HAISegLoader(object):
     def __getitem__(self, index):
         index = index * self.step
         if self.mode == "train":
-            return np.float32(self.train[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
+            return np.float32(self.train[index:index + self.win_size]), _zero_window_label(self.win_size)
         elif self.mode == 'val':
-            return np.float32(self.val[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
+            return np.float32(self.val[index:index + self.win_size]), _zero_window_label(self.win_size)
         elif self.mode == 'test':
             return np.float32(self.test[index:index + self.win_size]), np.float32(
                 self.test_labels[index:index + self.win_size])
@@ -270,9 +268,7 @@ class SMDSegLoader(object):
         data = self.scaler.transform(data)
         test_data = np.load(data_path + "/SMD_test.npy")
         self.test = self.scaler.transform(test_data)
-        self.train = data
-        data_len = len(self.train)
-        self.val = self.train[(int)(data_len * 0.8):]
+        self.train, self.val = _split_train_val(data)
         self.test_labels = np.load(data_path + "/SMD_test_label.npy")
 
     def __len__(self):
@@ -289,9 +285,9 @@ class SMDSegLoader(object):
     def __getitem__(self, index):
         index = index * self.step
         if self.mode == "train":
-            return np.float32(self.train[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
+            return np.float32(self.train[index:index + self.win_size]), _zero_window_label(self.win_size)
         elif (self.mode == 'val'):
-            return np.float32(self.val[index:index + self.win_size]), np.float32(self.test_labels[0:self.win_size])
+            return np.float32(self.val[index:index + self.win_size]), _zero_window_label(self.win_size)
         elif (self.mode == 'test'):
             return np.float32(self.test[index:index + self.win_size]), np.float32(
                 self.test_labels[index:index + self.win_size])
@@ -330,8 +326,7 @@ class BATADALSegLoader(object):
         test_data = np.load(data_path + "/BATADAL_test.npy")
         self.test = self.scaler.transform(test_data)
 
-        self.train = train_data
-        self.val = self.test
+        self.train, self.val = _split_train_val(train_data)
         self.test_labels = np.load(
             data_path + "/BATADAL_test_label.npy"
         ).reshape(-1, 1).astype(np.float32)
@@ -355,12 +350,12 @@ class BATADALSegLoader(object):
         if self.mode == "train":
             return (
                 np.float32(self.train[index : index + self.win_size]),
-                np.float32(self.test_labels[0 : self.win_size]),
+                _zero_window_label(self.win_size),
             )
         elif self.mode == "val":
             return (
                 np.float32(self.val[index : index + self.win_size]),
-                np.float32(self.test_labels[0 : self.win_size]),
+                _zero_window_label(self.win_size),
             )
         elif self.mode == "test":
             return (
@@ -382,8 +377,9 @@ class ST330IR001CP001SegLoader(object):
     The raw dataset is organized as one fixed-length window per CSV file.
     scripts/prepare_st330ir001_cp001.py converts it to:
       {data_path}/ST330IR001_CP001_train.npy       shape (N_train, 56, 29)
+      {data_path}/ST330IR001_CP001_val.npy         shape (N_val, 56, 29)
       {data_path}/ST330IR001_CP001_test.npy        shape (N_test, 56, 29)
-      {data_path}/ST330IR001_CP001_test_label.npy  shape (N_test, 56, 1)
+      {data_path}/ST330IR001_CP001_test_window_label.npy  shape (N_test,)
     """
 
     prefix = "ST330IR001_CP001"
@@ -395,10 +391,24 @@ class ST330IR001CP001SegLoader(object):
         self.scaler = StandardScaler()
 
         train_data = np.load(os.path.join(data_path, self.prefix + "_train.npy")).astype(np.float32)
+        val_path = os.path.join(data_path, self.prefix + "_val.npy")
+        if not os.path.exists(val_path):
+            raise FileNotFoundError(
+                f"{val_path} is required. Run scripts/prepare_st330ir001_cp001.py to create an explicit validation split."
+            )
+        val_data = np.load(val_path).astype(np.float32)
         test_data = np.load(os.path.join(data_path, self.prefix + "_test.npy")).astype(np.float32)
-        test_labels = np.load(os.path.join(data_path, self.prefix + "_test_label.npy")).astype(np.float32)
+        label_window_path = os.path.join(data_path, self.prefix + "_test_window_label.npy")
+        label_compat_path = os.path.join(data_path, self.prefix + "_test_label.npy")
+        if os.path.exists(label_window_path):
+            window_labels = np.load(label_window_path).astype(np.float32).reshape(-1)
+            test_labels = np.repeat(window_labels[:, None, None], test_data.shape[1], axis=1)
+        elif os.path.exists(label_compat_path):
+            test_labels = np.load(label_compat_path).astype(np.float32)
+        else:
+            raise FileNotFoundError(f"Missing {label_window_path} or {label_compat_path}")
 
-        if train_data.ndim != 3 or test_data.ndim != 3:
+        if train_data.ndim != 3 or val_data.ndim != 3 or test_data.ndim != 3:
             raise ValueError("ST330IR001_CP001 arrays must have shape (N, win_size, C).")
         if test_labels.ndim == 2:
             test_labels = test_labels[:, :, None]
@@ -413,7 +423,8 @@ class ST330IR001CP001SegLoader(object):
         n_features = train_data.shape[-1]
         self.scaler.fit(train_data.reshape(-1, n_features))
         train_scaled = self.scaler.transform(train_data.reshape(-1, n_features)).reshape(train_data.shape)
-        self.train, self.val = _split_train_val(train_scaled)
+        self.train = train_scaled
+        self.val = self.scaler.transform(val_data.reshape(-1, n_features)).reshape(val_data.shape)
         self.test = self.scaler.transform(test_data.reshape(-1, n_features)).reshape(test_data.shape)
         self.test_labels = test_labels
 

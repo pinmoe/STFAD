@@ -61,14 +61,48 @@ python scripts/prepare_batadal.py --src_dir <raw_csv_dir> --dst_dir data/BATADAL
 ```
 - ST330IR001.CP001:
 ```bash
-python scripts/prepare_st330ir001_cp001.py --src_dir data/ST330IR001.CP001 --dst_dir data/ST330IR001.CP001
-python main.py --mode train --dataset ST330IR001_CP001 --data_path data/ST330IR001.CP001 --win_size 56 --input_c 29 --output_c 29 --anormly_ratio 45.93 --model_save_path checkpoints/E1_ST330IR001_CP001
-python main.py --mode test  --dataset ST330IR001_CP001 --data_path data/ST330IR001.CP001 --win_size 56 --input_c 29 --output_c 29 --anormly_ratio 45.93 --model_save_path checkpoints/E1_ST330IR001_CP001
+python scripts/prepare_st330ir001_cp001.py --raw_root data/ST330IR001.CP001/raw --output_dir data/ST330IR001.CP001
+python main.py --mode train --dataset ST330IR001_CP001 --data_path data/ST330IR001.CP001 --win_size 56 --input_c 29 --output_c 29 --eval_unit auto --threshold_mode val_percentile --threshold_percentile 95 --model_save_path checkpoints/E1_ST330IR001_CP001
+python main.py --mode test  --dataset ST330IR001_CP001 --data_path data/ST330IR001.CP001 --win_size 56 --input_c 29 --output_c 29 --eval_unit auto --threshold_mode val_percentile --threshold_percentile 95 --model_save_path checkpoints/E1_ST330IR001_CP001
 ```
 
 ## Main Experimental Protocol
 
 This branch organizes experiments into two groups.
+
+### Journal/AutoDL reproducible protocol
+
+Run the journal-oriented multi-seed protocol on AutoDL:
+```bash
+export DATA_ROOT=/root/autodl-tmp/STFAD/data
+export RESULT_ROOT=/root/autodl-tmp/STFAD/results/paper_supplement
+export CKPT_ROOT=/root/autodl-tmp/STFAD/checkpoints/paper_supplement
+export LOG_ROOT=/root/autodl-tmp/STFAD/logs/paper_supplement
+export SEEDS="2024 2025 2026"
+export CUDA_DEVICE=0
+export TRAIN_BATCH_SIZE=256
+export TEST_BATCH_SIZE=256
+export RESUME=1
+export RUN_STFAD=1
+export RUN_SCORE_ABLATION=1
+export RUN_BASELINES=1
+export AUTO_SHUTDOWN=0
+
+bash scripts/run_paper_supplement.sh 2>&1 | tee "${LOG_ROOT}/tmux_master.log"
+```
+
+Summarize saved `metrics.json` files into paper tables:
+```bash
+python tools/summarize_paper_results.py --result_root results/paper_supplement --output_dir results/paper_supplement --expected_seeds 2024 2025 2026
+```
+
+Each STFAD test run writes structured metrics and arrays under:
+```text
+results/paper_supplement/<dataset>/<experiment_name>/seed_<seed>/
+```
+
+The supplement script also writes `summary_long.csv`, `summary_mean_std.csv`,
+`run_manifest.json`, `failed_runs.tsv`, per-run logs, and an environment record.
 
 ### E/B Series (model/prior design)
 
