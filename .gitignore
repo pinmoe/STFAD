@@ -158,6 +158,7 @@ scripts/*
 !tools/
 tools/*
 !tools/summarize_paper_results.py
+!tools/print_paper_supplement_results.py
 
 # ============================================
 # IDE / 编辑器
